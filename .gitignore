@@ -15,7 +15,9 @@
 /[Tt]emp/
 /[Oo]bj/
 /[Bb]uild/
-/[Bb]uilds/
+# builds stay local, except the WebGL client (Cloudflare Pages publishes it from the repo)
+/[Bb]uilds/*
+!/[Bb]uilds/WebGL/
 /[Ll]ogs/
 /[Uu]ser[Ss]ettings/
 *.log
@@ -105,3 +107,10 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# development leftovers
+/[Aa]ssets/Screenshots/
+/[Aa]ssets/Screenshots.meta
+/Tools/Sim/bin/
+/Tools/Sim/obj/
+/Tools/Sim/out/

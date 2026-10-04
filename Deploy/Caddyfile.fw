@@ -1,0 +1,26 @@
+# /etc/caddy/Caddyfile の nine.freeddns.org のブロックに、/fw の振り分けを 1 つ足す（Nine・軍人将棋の設定はそのまま残す）
+# ・/fw で始まる接続だけをフィールド・コマンドのサーバー（127.0.0.1:7782）へ
+# クライアントは wss://nine.freeddns.org/fw に接続する（ゲームサーバーはパスを見ないので、そのまま渡してよい）
+
+nine.freeddns.org {
+	handle /fw* {
+		reverse_proxy 127.0.0.1:7782 {
+			stream_timeout 1h
+			stream_close_delay 30s
+		}
+	}
+
+	handle /gunjin* {
+		reverse_proxy 127.0.0.1:7778 {
+			stream_timeout 1h
+			stream_close_delay 30s
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:27777 {
+			stream_timeout 1h
+			stream_close_delay 30s
+		}
+	}
+}

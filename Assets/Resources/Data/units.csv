@@ -1,0 +1,17 @@
+id,nameKey,shortName,price,move,moveClass,fuel,fuelPerPhase,ammo,ammoPrice,rangeMin,rangeMax,capture,cargoCapacity,cargoClass,canSupply
+INF,unit.inf,歩,1000,3,Foot,99,0,9,1,1,1,2,0,-,0
+MECH,unit.mech,工,2000,2,Foot,70,0,3,3,1,1,1,0,-,0
+TANK_A,unit.tank_a,戦A,16000,6,Vehicle,70,0,6,5,1,1,0,0,-,0
+TANK_B,unit.tank_b,戦B,6000,5,Vehicle,50,0,4,4,1,1,0,0,-,0
+APC,unit.apc,輸,4200,6,Vehicle,70,0,4,3,1,1,0,1,Foot,0
+ART_A,unit.art_a,自A,13000,4,Vehicle,50,0,5,7,3,5,0,0,-,0
+ART_B,unit.art_b,自B,5500,5,Vehicle,30,0,3,6,2,3,0,0,-,0
+AAM,unit.aam,対ミ,11000,4,Vehicle,40,0,2,8,3,5,0,0,-,0
+AAG,unit.aag,高射,5500,5,Vehicle,50,0,4,3,1,1,0,0,-,0
+SUP,unit.sup,補,3000,5,Vehicle,60,0,0,0,0,0,0,0,-,1
+FTR_A,unit.ftr_a,機A,22000,10,Air,99,5,5,8,1,1,0,0,-,0
+FTR_B,unit.ftr_b,機B,15000,10,Air,99,5,4,8,1,1,0,0,-,0
+BMB,unit.bmb,爆,20000,8,Air,99,5,5,6,1,1,0,0,-,0
+HELI,unit.heli,ヘリ,4000,6,Air,60,2,4,3,1,1,0,1,Foot,0
+BSHIP,unit.bship,艦,28800,6,Ship,99,0,6,6,3,5,0,0,-,0
+LANDER,unit.lander,揚,18500,5,Ship,99,0,6,3,1,1,0,2,Ground,0

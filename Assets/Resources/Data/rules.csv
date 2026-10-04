@@ -1,0 +1,11 @@
+key,value,note
+terrainK,100,防御値1あたりの軽減率(%×100で1.0)
+attackerBonus,0,仕掛けた側の上乗せ(%)
+randMin,0,乱数の最小(HP)
+randMax,9,乱数の最大(HP)
+captureGoal,20,占領完了に必要な累計人数
+timeLimit,255,この日数を超えたら引き分け
+productionRadius,2,基地からの生産可能距離(上下左右の正方形)
+resupplyHp,20,全補で回復するHP(2機)
+startFunds,0,初期資金
+unitLimit,50,1軍あたりの部隊数の上限(搭載中も含む)
