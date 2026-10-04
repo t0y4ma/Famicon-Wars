@@ -169,3 +169,6 @@ Packages/packages-lock.json linguist-generated
 
 # Exceptions for .asset files such as lightning pre-baking
 LightingData.asset     binary
+
+# Cloudflare Pages serves the repo as is and cannot read LFS pointers: keep the web build out of LFS
+Builds/WebGL/**         -filter -diff -merge -text
