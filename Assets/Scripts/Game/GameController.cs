@@ -538,7 +538,7 @@ namespace FamiconWars.Game
             hud.ShowProduce(Labels.Get(state.TerrainAt(x, y).NameKey), state.Funds[(int)state.Active], list, d =>
             {
                 if (Try(new ProduceCommand { Army = state.Active, X = produceX, Y = produceY, UnitType = d.Id })) Cancel();
-            });
+            }, state.Active);
         }
 
         void Cancel()

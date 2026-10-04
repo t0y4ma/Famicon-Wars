@@ -38,6 +38,8 @@ namespace FamiconWars.Core
         public char Char;
         public int DefFoot, DefVehicle, DefShip, Income;
         public bool IsProperty;
+        /// <summary>Units may be unloaded here, and a transport standing here may unload (not on HQ, bridge, forest, mountain, water).</summary>
+        public bool Unload = true;
         public Domain? Produces, Supplies;
         /// <summary>Move cost per MoveClass; -1 = impassable.</summary>
         public int[] Cost = new int[4];
@@ -108,7 +110,8 @@ namespace FamiconWars.Core
                     Index = g.Terrains.Count, Id = r["id"], NameKey = r["nameKey"], Char = r["char"][0],
                     DefFoot = r.Int("defFoot"), DefVehicle = r.Int("defVehicle"), DefShip = r.Int("defShip"),
                     IsProperty = r.Int("isProperty") == 1, Income = r.Int("income"),
-                    Produces = ParseDomain(r["produces"]), Supplies = ParseDomain(r["supplies"]), Color = r["color"]
+                    Produces = ParseDomain(r["produces"]), Supplies = ParseDomain(r["supplies"]), Color = r["color"],
+                    Unload = string.IsNullOrEmpty(r["unload"]) || r.Int("unload") == 1
                 };
                 t.Cost[(int)MoveClass.Foot] = r.Int("costFoot");
                 t.Cost[(int)MoveClass.Vehicle] = r.Int("costVehicle");

@@ -101,12 +101,14 @@ namespace FamiconWars.Core
                     if (stop != StopKind.Empty) return "降車できません";
                     if (!u.Cargo.Contains(c.CargoId)) return "その部隊は搭載していません";
                     if (d.Domain == Domain.Sea && !Movement.IsShoreForShip(s, c.ToX, c.ToY)) return "揚陸艦は港か砂浜でしか降車できません";
+                    if (!s.TerrainAt(c.ToX, c.ToY).Unload) return "この地形からは降車できません";
                     if (Movement.Distance(c.ToX, c.ToY, c.DropX, c.DropY) != 1 || !s.InBounds(c.DropX, c.DropY)) return "降車先が隣ではありません";
                     var occ = s.UnitAt(c.DropX, c.DropY);
                     if (occ != null && occ.Id != u.Id) return "降車先に部隊がいます";
                     if (c.DropX == u.X && c.DropY == u.Y && moved) { } // the transport left this tile: allowed
                     var cargo = s.UnitById(c.CargoId);
-                    if (s.TerrainAt(c.DropX, c.DropY).Cost[(int)s.Def(cargo).MoveClass] < 0) return "その地形には降ろせません";
+                    var dropT = s.TerrainAt(c.DropX, c.DropY);
+                    if (dropT.Cost[(int)s.Def(cargo).MoveClass] < 0 || !dropT.Unload) return "その地形には降ろせません";
                     return null;
                 }
                 case UnitAction.Supply:
@@ -444,7 +446,8 @@ namespace FamiconWars.Core
                 var t = s.TerrainAt(u.X, u.Y);
                 bool home = t.IsProperty && s.Owner[s.Index(u.X, u.Y)] == a && t.Supplies == d.Domain;
                 if (d.FuelPerPhase > 0 && !home) u.Fuel = Math.Max(0, u.Fuel - d.FuelPerPhase);
-                if ((d.Domain == Domain.Air || d.Domain == Domain.Sea) && u.Fuel <= 0 && !home) lost.Add(u);
+                // aircraft at their own airport never crash; ships sink at 0 fuel even in port
+                if ((d.Domain == Domain.Air && u.Fuel <= 0 && !home) || (d.Domain == Domain.Sea && u.Fuel <= 0)) lost.Add(u);
             }
             foreach (var u in lost) RemoveUnit(s, u, r, s.Def(u).Domain == Domain.Air ? "墜落" : "沈没");
             CheckRout(s, r);

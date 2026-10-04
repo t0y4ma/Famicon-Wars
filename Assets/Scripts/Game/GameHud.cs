@@ -166,10 +166,11 @@ namespace FamiconWars.Game
             Pin(ub, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -58), new Vector2(0, 150), pivot: new Vector2(0.5f, 1), stretchX: true);
             var divider = Panel("Divider", ub, PlateEdge);
             Pin(divider, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, 0), new Vector2(-36, 2), pivot: new Vector2(0.5f, 1), stretchX: true);
-            unitSwatch = Panel("Swatch", ub, Color.white).GetComponent<Image>();
-            Pin((RectTransform)unitSwatch.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(18, -16), new Vector2(14, 34), pivot: new Vector2(0, 1));
+            unitSwatch = Panel("Icon", ub, Color.white).GetComponent<Image>();
+            unitSwatch.preserveAspect = true; unitSwatch.raycastTarget = false;
+            Pin((RectTransform)unitSwatch.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(10, -6), new Vector2(52, 52), pivot: new Vector2(0, 1));
             unitName = Label("Name", ub, SizeBody, Paper, TextAlignmentOptions.TopLeft, true);
-            Pin(unitName.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(42, -14), new Vector2(240, 36), pivot: new Vector2(0, 1));
+            Pin(unitName.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(68, -14), new Vector2(220, 36), pivot: new Vector2(0, 1));
             unitCount = Label("Count", ub, SizeNumber, Paper, TextAlignmentOptions.TopRight, true);
             Pin(unitCount.rectTransform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-18, -8), new Vector2(120, 44), pivot: new Vector2(1, 1));
             fuelFill = Meter("Fuel", ub, "燃料", -64);
@@ -225,7 +226,10 @@ namespace FamiconWars.Game
             if (u != null)
             {
                 var d = s.Def(u);
-                unitSwatch.color = ArmyColor(u.Army);
+                var icon = UnitIcons.Get(d.Id, u.Army);
+                unitSwatch.sprite = icon;
+                unitSwatch.color = icon != null ? Color.white : ArmyColor(u.Army);
+                unitSwatch.rectTransform.localScale = new Vector3(u.Army == Army.Blue ? -1 : 1, 1, 1);
                 unitName.text = Labels.Get(d.NameKey);
                 unitCount.text = "<size=60%>×</size>" + u.Count;
                 unitCount.color = u.Count <= 3 ? Danger : Paper;
@@ -349,7 +353,7 @@ namespace FamiconWars.Game
             producePanel.gameObject.SetActive(false);
         }
 
-        public void ShowProduce(string facilityName, int funds, List<UnitDef> units, Action<UnitDef> pick)
+        public void ShowProduce(string facilityName, int funds, List<UnitDef> units, Action<UnitDef> pick, Army army = Army.Red)
         {
             ClearChildren(produceList);
             produceTitle.text = "生産 <size=60%><color=#A3AC92>" + facilityName + "   資金 " + funds.ToString("N0") + "</color></size>";
@@ -364,7 +368,14 @@ namespace FamiconWars.Game
                 var txt = b.GetComponentInChildren<TextMeshProUGUI>();
                 txt.alignment = TextAlignmentOptions.MidlineLeft;
                 txt.text = Labels.Get(d.NameKey);
-                Fill(txt.rectTransform, 18, 0, 300, 0);
+                Fill(txt.rectTransform, 70, 0, 250, 0);
+                var pic = Panel("Icon", b.transform, Color.white).GetComponent<Image>();
+                pic.raycastTarget = false; pic.preserveAspect = true;
+                pic.sprite = UnitIcons.Get(d.Id, army);
+                if (pic.sprite == null) pic.color = Color.clear;
+                else if (!afford) pic.color = new Color(1, 1, 1, 0.4f);
+                Pin(pic.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(14, 0), new Vector2(46, 46), pivot: new Vector2(0, 0.5f));
+                pic.rectTransform.localScale = new Vector3(army == Army.Blue ? -1 : 1, 1, 1);
                 var stats = Label("Stats", b.transform, SizeSmall, afford ? Muted : Danger, TextAlignmentOptions.MidlineRight, false);
                 stats.text = afford ? $"移{d.Move}  射{d.RangeMin}-{d.RangeMax}  燃{d.Fuel}" : "資金不足";
                 Fill(stats.rectTransform, 220, 0, 150, 0);

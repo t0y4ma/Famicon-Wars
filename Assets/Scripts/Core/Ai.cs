@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace FamiconWars.Core
@@ -51,7 +51,11 @@ namespace FamiconWars.Core
         public int EcoJamSlots = 8;          // ...or when this few unit slots remain     // under pressure, save for the strong unit instead of buying a cheap one
         public float LastPress;              // diagnostics: slot pressure at the last production decision
         public float EcoSlotFrom = 0.4f;     // fraction of the unit limit where slot pressure starts (full at +0.5)
-        public bool RotateWeak = true;       // a battered front unit steps back so a fresh one can take its tile      // infantry share / quality rules apply only once the army reaches this fraction of the unit limit (0 = always)
+        public bool RotateWeak = true;
+        public int EcoLateCapRange = 8;      // any day: build a capturer for a property this close that no own infantry is nearer to (0 = off)
+        public bool JoinAfterAct = true;       // only join units that have already acted this phase
+        public bool JoinCapture = true;        // join a capturing squad: the capture gauge is kept, so the capture finishes sooner
+        public bool TransportTactics = true;   // early: a truck carries infantry to far properties; afterwards it stands in front of them as a wall       // a battered front unit steps back so a fresh one can take its tile      // infantry share / quality rules apply only once the army reaches this fraction of the unit limit (0 = always)
 
         public bool Has(AiFeature f) => (Features & f) != 0;
         public int Depth => Has(AiFeature.Lookahead) ? 3 : Has(AiFeature.GlobalOrder) ? 2 : Has(AiFeature.Threat) ? 1 : 0;
@@ -106,7 +110,7 @@ namespace FamiconWars.Core
             int key = s.Day * 2 + (int)s.Active;
             if (key != phaseKey)
             {
-                phaseKey = key; commandsThisPhase = 0; resupplyConsidered = false; savingThisPhase = false;
+                phaseKey = key; commandsThisPhase = 0; resupplyConsidered = false; savingThisPhase = false; lateCapThisPhase = false;
                 forceWait.Clear(); done.Clear(); productionTried.Clear();
             }
             if (++commandsThisPhase > 300) return new EndPhaseCommand { Army = Army };
@@ -258,9 +262,13 @@ namespace FamiconWars.Core
 
         Command ChooseProduction(GameState s)
         {
-            for (int y = 0; y < s.Height; y++)
-                for (int x = 0; x < s.Width; x++)
+            // blue scans from the far corner so that both armies try their facilities in the same order
+            // relative to the front on a point-symmetric map
+            bool rev = Army == Army.Blue;
+            for (int yi = 0; yi < s.Height; yi++)
+                for (int xi = 0; xi < s.Width; xi++)
                 {
+                    int y = rev ? s.Height - 1 - yi : yi, x = rev ? s.Width - 1 - xi : xi;
                     int key = y * 4096 + x;
                     if (productionTried.Contains(key)) continue;
                     var list = RulesEngine.ProducibleAt(s, Army, x, y);
@@ -282,7 +290,7 @@ namespace FamiconWars.Core
             return n;
         }
 
-        bool savingThisPhase;
+        bool savingThisPhase, lateCapThisPhase;
         int reliefUnit = -1, reliefTile = -1;
 
         UnitDef PickUnit(GameState s, List<UnitDef> list, int fx, int fy)
@@ -379,6 +387,10 @@ namespace FamiconWars.Core
             int wantCap = Math.Min(capTargets, 2 + capTargets / 3);
             if (s.Day > 10) wantCap = Math.Min(wantCap, Profile.EcoWantCapLate);
             bool needInf = capturers < wantCap;
+            // Late game: infantry are still the only way to take a base. A property close to this facility
+            // that no foot soldier of ours is nearer to, and that the enemy is not standing on or right next
+            // to, gets one capturer, at any stage of the game and regardless of how full the front is.
+            if (!needInf && !lateCapThisPhase && Profile.EcoLateCapRange > 0 && LateCaptureTarget(s, fx, fy)) { needInf = true; lateCapThisPhase = true; }
 
             // ---- how scarce is a unit slot? (unit limit headroom, and how jammed the front is) ----
             float pSlots = Clamp01((myCount - s.Rules.UnitLimit * Profile.EcoSlotFrom) / (s.Rules.UnitLimit * 0.5f));
@@ -431,6 +443,7 @@ namespace FamiconWars.Core
                     if (slotPressure) wgt *= (float)Math.Pow(Math.Max(1000, t.Price) / 6000.0, Profile.EcoQuality);
                 }
                 else wgt *= 0.3f;
+                if (t.CargoCapacity > 0 && t.Domain == Domain.Ground && Profile.TransportTactics && EarlyTruck(s, t, fx, fy)) return aff.Count * 1.2f;
                 if (t.CargoCapacity > 0 && t.Domain != Domain.Air && !NeedTransport(s, t)) wgt *= 0.2f;
                 if (t.CargoCapacity > 0 && t.Domain == Domain.Air && !needInf) wgt *= 0.3f;
                 if (t.CanSupply && !NeedSupply(s)) wgt *= 0.1f;
@@ -509,6 +522,53 @@ namespace FamiconWars.Core
             }
             float cap = attackTiles.Count;
             return Clamp01((crowd - cap * 0.6f) / (cap * 0.6f + 1));
+        }
+
+        /// <summary>
+        /// Is there a property within EcoLateCapRange of this facility that no own foot unit is
+        /// at least as close to, and that is not held or screened by an enemy unit?
+        /// </summary>
+        bool LateCaptureTarget(GameState s, int fx, int fy)
+        {
+            for (int i = 0; i < s.Owner.Length; i++)
+            {
+                var t = s.Data.Terrains[s.Terrain[i]];
+                if (!t.IsProperty || s.Owner[i] == Army) continue;
+                int x = i % s.Width, y = i / s.Width;
+                int dist = Movement.Distance(x, y, fx, fy);
+                if (dist > Profile.EcoLateCapRange) continue;
+                bool covered = false, hot = false;
+                foreach (var u in s.Units)
+                {
+                    if (u.IsCarried) continue;
+                    int du = Movement.Distance(u.X, u.Y, x, y);
+                    if (u.Army == Army) { if (s.Def(u).Capture >= 2 && du <= dist) { covered = true; break; } }
+                    else if (du <= 3 && !s.Def(u).IsIndirect || du <= 1) hot = true;
+                }
+                if (!covered && !hot) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Capture race: one truck early on when the properties still to take are two or more infantry
+        /// moves away from this factory. It carries a squad out and then shields the capture.
+        /// </summary>
+        bool EarlyTruck(GameState s, UnitDef t, int fx, int fy)
+        {
+            if (s.Day > 6) return false;
+            foreach (var u in s.Units) if (u.Army == Army && s.Def(u).CargoCapacity > 0 && s.Def(u).Domain == Domain.Ground) return false;
+            int foot = 0;
+            foreach (var u in s.Units) if (u.Army == Army && s.Def(u).Capture > 0) foot++;
+            if (foot == 0) return false;   // nothing to carry yet: infantry first
+            int far = 0;
+            for (int i = 0; i < s.Owner.Length; i++)
+            {
+                var ter = s.Data.Terrains[s.Terrain[i]];
+                if (!ter.IsProperty || s.Owner[i] == Army || ter.Id == "HQ") continue;
+                if (Movement.Distance(i % s.Width, i / s.Width, fx, fy) >= 7) far++;
+            }
+            return far >= 3;
         }
 
         bool NeedTransport(GameState s, UnitDef t)
@@ -616,7 +676,7 @@ namespace FamiconWars.Core
 
                     var reach = Movement.Reachable(s, weak);
                     int best = -1; float bestSc = float.MinValue;
-                    foreach (var kv in reach.Cost)
+                    foreach (var kv in Ordered(reach.Cost))
                     {
                         int i = kv.Key, x = i % w, y = i / w;
                         if (i == wi || reach.EndOnly.Contains(i) || Movement.StopAt(s, weak, x, y) != StopKind.Empty) continue;
@@ -699,7 +759,7 @@ namespace FamiconWars.Core
                 var d = s.Def(u);
                 var reach = Movement.Reachable(s, u);
                 int start = s.Index(u.X, u.Y);
-                foreach (var kv in reach.Cost)
+                foreach (var kv in Ordered(reach.Cost))
                 {
                     int i = kv.Key, x = i % w, y = i / w;
                     var stop = Movement.StopAt(s, u, x, y);
@@ -711,12 +771,27 @@ namespace FamiconWars.Core
                     if (stop == StopKind.Join)
                     {
                         var o = FindOther(u, x, y);
-                        if (o != null && u.Hp <= 40 && u.Hp + o.Hp <= 110) emit(Cmd(u, x, y, UnitAction.Join), 300 + Positional(u, d, start, i, kv.Value, o.Hp) * 0.5f);
-                        else if (o != null && p.Has(AiFeature.Formation) && u.Hp <= 70 && o.Hp < 100 && u.Hp + o.Hp <= 110)
+                        if (o == null) continue;
+                        // walking off a half-taken property throws its progress away
+                        float leave = moved && s.CapturingUnit[start] == u.Id ? PropValue(start) * s.CaptureProgress[start] / (float)s.Rules.CaptureGoal + 200 : 0;
+                        bool capturer = s.CapturingUnit[i] == o.Id;
+                        // a join leaves the merged unit done for the phase: never take away an action the
+                        // other unit still has (a capturer captures first, then gets joined)
+                        if (!o.Acted && (capturer || p.JoinAfterAct)) continue;
+                        if (p.Has(AiFeature.Capture) && p.JoinCapture && d.Capture > 0 && capturer && o.Hp < 100)
+                        {
+                            // the capture gauge survives a join: shield the squad that just captured so the
+                            // enemy cannot wipe out its progress, and capture with more men next turn
+                            float jc = JoinCaptureScore(u, d, o, i);
+                            if (jc > 0) emit(Cmd(u, x, y, UnitAction.Join), jc - leave + Positional(u, d, start, i, kv.Value, Math.Min(100, u.Hp + o.Hp)) * 0.5f);
+                            continue;
+                        }
+                        else if (u.Hp <= 40 && u.Hp + o.Hp <= 110) emit(Cmd(u, x, y, UnitAction.Join), 300 - leave + Positional(u, d, start, i, kv.Value, o.Hp) * 0.5f);
+                        else if (p.Has(AiFeature.Formation) && u.Hp <= 70 && o.Hp < 100 && u.Hp + o.Hp <= 110)
                         {
                             // two half-strength units hold one tile at full strength and stop being easy kills
                             float gain = 0.25f * d.Price * Math.Min(u.Hp, 100 - o.Hp) / 100f;
-                            emit(Cmd(u, x, y, UnitAction.Join), 150 + gain + Positional(u, d, start, i, kv.Value, Math.Min(100, u.Hp + o.Hp)) * 0.5f);
+                            emit(Cmd(u, x, y, UnitAction.Join), 150 + gain - leave + Positional(u, d, start, i, kv.Value, Math.Min(100, u.Hp + o.Hp)) * 0.5f);
                         }
                         continue;
                     }
@@ -755,7 +830,7 @@ namespace FamiconWars.Core
                     }
 
                     // unload
-                    if (u.Cargo.Count > 0 && !(d.Domain == Domain.Sea && !Movement.IsShoreForShip(s, x, y)))
+                    if (u.Cargo.Count > 0 && t.Unload && !(d.Domain == Domain.Sea && !Movement.IsShoreForShip(s, x, y)))
                     {
                         foreach (var cid in u.Cargo)
                         {
@@ -768,7 +843,7 @@ namespace FamiconWars.Core
                                 if (!s.InBounds(dx, dy)) continue;
                                 var occ = s.UnitAt(dx, dy);
                                 if (occ != null && occ.Id != u.Id) continue;
-                                if (s.TerrainAt(dx, dy).Cost[(int)cd.MoveClass] < 0) continue;
+                                if (s.TerrainAt(dx, dy).Cost[(int)cd.MoveClass] < 0 || !s.TerrainAt(dx, dy).Unload) continue;
                                 var c = Cmd(u, x, y, UnitAction.Unload); c.CargoId = cid; c.DropX = dx; c.DropY = dy;
                                 emit(c, pos + UnloadScore(cargo, i, s.Index(dx, dy)));
                             }
@@ -808,6 +883,21 @@ namespace FamiconWars.Core
                     if (left - d.FuelPerPhase * 2 < home) sc -= d.Price * 0.6f;
                 }
                 if (t.Produces != null && s.Owner[dest] == me && RulesEngine.InProductionRange(s, me, x, y)) sc -= 3000;
+                if (p.TransportTactics && d.CargoCapacity > 0 && d.Domain == Domain.Ground && u.Cargo.Count == 0)
+                {
+                    // a cheap truck standing between the enemy and a capturing squad buys the capture a day
+                    int[] bx = { 1, -1, 0, 0 }, by = { 0, 0, 1, -1 };
+                    var fd = Dist(MoveClass.Vehicle, "enemy:" + d.Index);
+                    for (int k = 0; k < 4; k++)
+                    {
+                        int nx = x + bx[k], ny = y + by[k];
+                        if (!s.InBounds(nx, ny)) continue;
+                        var o = s.UnitAt(nx, ny);
+                        if (o == null || o.Army != me || s.CapturingUnit[s.Index(nx, ny)] != o.Id) continue;
+                        sc += 500;
+                        if (fd[dest] < fd[s.Index(nx, ny)]) sc += 400;   // on the enemy's side of it
+                    }
+                }
                 if (p.Has(AiFeature.Formation) && hp <= 60 && t.IsProperty && s.Owner[dest] == me && t.Supplies == d.Domain)
                     sc += d.Price * 0.25f * (100 - hp) / 100f;   // battered units head for a city to be repaired
                 if (p.Has(AiFeature.Formation) && d.Domain == Domain.Ground && dest != start)
@@ -962,6 +1052,58 @@ namespace FamiconWars.Core
                 return v;
             }
 
+            /// <summary>
+            /// Joining a squad that has already captured this phase. The gauge is kept, so the join is worth
+            /// what it saves: the progress itself when the enemy could otherwise wipe the capturer out, and
+            /// the turns saved because more men survive to capture next turn. Nothing when the capturer is
+            /// safe and finishes as fast alone.
+            /// </summary>
+            float JoinCaptureScore(UnitState u, UnitDef d, UnitState o, int i)
+            {
+                int goal = s.Rules.CaptureGoal, prog = s.CaptureProgress[i];
+                int need = Math.Max(1, goal - prog);
+                int after = Math.Min(100, u.Hp + o.Hp);
+                float hit = IncomingHp(o, i);
+                int cB = Math.Max(0, (int)(o.Hp - hit) + 9) / 10, cA = Math.Max(0, (int)(after - hit) + 9) / 10;
+                if (o.Hp - hit <= 0) cB = 0;
+                if (after - hit <= 0) cA = 0;
+                Func<int, int> turns = c => c <= 0 ? 6 : Math.Min(6, (need + c - 1) / c);
+                float pv = PropValue(i);
+                float sc = 100 + pv * 0.15f * (turns(cB) - turns(cA));
+                if (cB == 0 && cA > 0) sc += pv * prog / (float)goal + pv * 0.3f;   // the progress would be lost
+                if (turns(cB) == turns(cA)) sc -= 400;
+                sc -= Math.Max(0, u.Hp + o.Hp - 100) / 100f * d.Price;          // men beyond a full squad are lost
+                return sc;
+            }
+
+            /// <summary>HP the enemy could take off a unit on this tile next phase (strongest hit + half the second).</summary>
+            float IncomingHp(UnitState u, int idx)
+            {
+                var d = s.Def(u);
+                int x = idx % w, y = idx / w;
+                float h1 = 0, h2 = 0;
+                foreach (var er in EnemyReach())
+                {
+                    if (!er.tiles.Contains(idx) || s.Data.BaseDamage(s.Def(er.e), d) < 0) continue;
+                    float dmg = Combat.BaseRoll(s, er.e, er.e.Hp, u, x, y, false) + 4;
+                    if (dmg > h1) { h2 = h1; h1 = dmg; } else if (dmg > h2) h2 = dmg;
+                }
+                return h1 + h2 * 0.5f;
+            }
+
+            /// <summary>
+            /// Reachable tiles in an order that is the same for both armies under a 180-degree turn of the
+            /// map, so equal scores are broken the same way for each side (index order would favour moving
+            /// up and left, which is forward for one army and backward for the other).
+            /// </summary>
+            List<KeyValuePair<int, int>> Ordered(Dictionary<int, int> cost)
+            {
+                var l = new List<KeyValuePair<int, int>>(cost);
+                if (me == Army.Blue) l.Sort((a, b) => b.Key.CompareTo(a.Key));
+                else l.Sort((a, b) => a.Key.CompareTo(b.Key));
+                return l;
+            }
+
             float CaptureScore(UnitState u, int i)
             {
                 int prog = s.CapturingUnit[i] == u.Id ? s.CaptureProgress[i] : 0;
@@ -1021,7 +1163,13 @@ namespace FamiconWars.Core
                 {
                     if (u.Cargo.Count > 0) return Dist(d.MoveClass, "cap2");
                     var pick = Dist(d.MoveClass, "pickup");
-                    return emptyDist.Contains(d.MoveClass + "pickup") ? Dist(d.MoveClass, "own") : pick;
+                    if (!emptyDist.Contains(d.MoveClass + "pickup")) return pick;
+                    if (p.TransportTactics && d.Domain == Domain.Ground)
+                    {
+                        var scr = Dist(d.MoveClass, "screen");
+                        if (!emptyDist.Contains(d.MoveClass + "screen")) return scr;
+                    }
+                    return Dist(d.MoveClass, "own");
                 }
                 if (d.Capture > 0) return Dist(MoveClass.Foot, d.Capture >= 2 ? "cap2" : "cap1");
                 if (p.Has(AiFeature.Fuel) && d.FuelPerPhase > 0 && u.Fuel <= d.Fuel * 0.4f) return Dist(d.MoveClass, "airport");
@@ -1072,6 +1220,19 @@ namespace FamiconWars.Core
                         var d = s.Def(u);
                         if (u.Army != me || u.IsCarried || d.Domain != Domain.Ground || d.CanSupply) continue;
                         if (u.Fuel < d.Fuel * 0.4f || (d.Ammo > 0 && u.Ammo < d.Ammo * 0.4f)) src.Add(s.Index(u.X, u.Y));
+                    }
+                }
+                else if (key == "screen")
+                {
+                    // tiles next to our units that are capturing: where a truck makes a wall
+                    foreach (var u in s.Units)
+                    {
+                        if (u.Army != me || u.IsCarried || s.CapturingUnit[s.Index(u.X, u.Y)] != u.Id) continue;
+                        for (int k = 0; k < 4; k++)
+                        {
+                            int x = u.X + (k == 0 ? 1 : k == 1 ? -1 : 0), y = u.Y + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                            if (s.InBounds(x, y) && s.UnitAt(x, y) == null) src.Add(s.Index(x, y));
+                        }
                     }
                 }
                 else if (key == "own")

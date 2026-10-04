@@ -76,11 +76,16 @@ namespace FamiconWars.Game
         {
             new MapEntry { Id = "map01", Name = "演習島", Width = 18, Height = 12, Ready = true,
                 Note = "川で分かれた2つの陸地を3本の橋がつなぐ。最初の一戦に。" },
-            new MapEntry { Id = "wip02", Name = "ふたつの海峡", Note = "輸送と上陸がテーマ(制作中)" },
-            new MapEntry { Id = "wip03", Name = "山岳回廊", Note = "歩兵と間接攻撃がテーマ(制作中)" },
-            new MapEntry { Id = "wip04", Name = "群島決戦", Note = "航空・海上の総力戦(制作中)" },
-            new MapEntry { Id = "wip05", Name = "対戦用 A", Note = "点対称の対戦マップ(制作中)" },
-            new MapEntry { Id = "wip06", Name = "対戦用 B", Note = "点対称の対戦マップ(制作中)" },
+            new MapEntry { Id = "map02", Name = "ふたつの海峡", Width = 22, Height = 14, Ready = true,
+                Note = "海峡が陸を分ける。両端の長い橋か、揚陸艦で中央の島と対岸へ。" },
+            new MapEntry { Id = "map03", Name = "山岳回廊", Width = 20, Height = 14, Ready = true,
+                Note = "山脈を3つの峠が抜ける。歩兵と間接攻撃が主役。" },
+            new MapEntry { Id = "map04", Name = "群島決戦", Width = 24, Height = 16, Ready = true,
+                Note = "島々を橋がつなぐ。空港と港を活かした航空・海上の総力戦。" },
+            new MapEntry { Id = "map05", Name = "対戦用 A", Width = 20, Height = 14, Ready = true,
+                Note = "点対称の平原。森と山が少し、道は一本。後手は都市が1つ多い。" },
+            new MapEntry { Id = "map06", Name = "対戦用 B", Width = 22, Height = 15, Ready = true,
+                Note = "中央を川が横切る点対称マップ。6本の橋の取り合い。" },
         };
 
         public static MapEntry Find(string id)

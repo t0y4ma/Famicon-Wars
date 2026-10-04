@@ -48,7 +48,7 @@ namespace FamiconWars.Tests
             var r = Act(s, red, 0, 0, UnitAction.Attack, blue.Id);
             Assert.IsTrue(r.Ok, r.Error);
             Assert.AreEqual(73, blue.Hp, "45 x 0.6 = 27");
-            Assert.AreEqual(56, red.Hp, "counter 45 x (1 - 0.01) = 44");
+            Assert.AreEqual(55, red.Hp, "counter 45 on a road (defence 0)");
             Assert.AreEqual(8, blue.Count);
             Assert.AreEqual(6, red.Count);
         }
@@ -72,7 +72,7 @@ namespace FamiconWars.Tests
             var tank = At(s, 0, 0); var inf = At(s, 1, 0);
             Assert.IsTrue(Act(s, tank, 0, 0, UnitAction.Attack, inf.Id).Ok);
             Assert.AreEqual(100 - 76, inf.Hp, "85 x 0.9 = 76");
-            Assert.AreEqual(96, tank.Hp, "infantry fires back with its full 10 men: 5 x 0.99 = 4");
+            Assert.AreEqual(95, tank.Hp, "infantry fires back with its full 10 men: 5 on a road (defence 0)");
         }
 
         [Test]
@@ -201,9 +201,9 @@ namespace FamiconWars.Tests
             var g = LoadData();
             var s = Make(g, new[] { "HCCA" }, new[] { "rrrb" }, ("INF", Army.Red, 0, 0), ("INF", Army.Blue, 3, 0));
             RulesEngine.StartGame(s);
-            Assert.AreEqual(2000, s.Funds[0], "two cities, HQ gives 0");
+            Assert.AreEqual(6000, s.Funds[0], "two cities (1000 each) + HQ (4000)");
             Assert.IsTrue(RulesEngine.Apply(s, new EndPhaseCommand { Army = Army.Red }).Ok);
-            Assert.AreEqual(1000, s.Funds[1]);
+            Assert.AreEqual(2000, s.Funds[1], "blue's airport");
             Assert.AreEqual(Army.Blue, s.Active);
         }
 
@@ -338,6 +338,41 @@ namespace FamiconWars.Tests
             Assert.IsFalse(Movement.Reachable(s, inf).Reaches(s.Index(1, 0)));
             Assert.AreEqual(StopKind.None, Movement.StopAt(s, inf, 1, 0));
             Assert.IsFalse(Act(s, inf, 1, 0, UnitAction.Load).Ok);
+        }
+
+        [Test]
+        public void HqProducesGroundUnits()
+        {
+            var g = LoadData();
+            var s = Make(g, new[] { "H." }, new[] { "r." });
+            s.Funds[0] = 10000;
+            Assert.IsTrue(RulesEngine.ProducibleAt(s, Army.Red, 0, 0).Any(d => d.Id == "TANK_B"));
+            Assert.IsTrue(RulesEngine.Apply(s, new ProduceCommand { Army = Army.Red, X = 0, Y = 0, UnitType = "INF" }).Ok);
+        }
+
+        [Test]
+        public void IncomePerProperty()
+        {
+            var g = LoadData();
+            Assert.AreEqual(4000, g.Terrain("HQ").Income);
+            Assert.AreEqual(0, g.Terrain("FACTORY").Income);
+            Assert.AreEqual(1000, g.Terrain("CITY").Income);
+            Assert.AreEqual(2000, g.Terrain("AIRPORT").Income);
+            Assert.AreEqual(2000, g.Terrain("PORT").Income);
+        }
+
+        [Test]
+        public void NoUnloadingFromABridgeOrIntoAForest()
+        {
+            var g = LoadData();
+            var s = Make(g, new[] { ".#f", "..." }, null, ("APC", Army.Red, 0, 1), ("INF", Army.Red, 1, 1));
+            var apc = At(s, 0, 1); var inf = At(s, 1, 1);
+            Assert.IsTrue(Act(s, inf, 0, 1, UnitAction.Load).Ok);
+            s.Units.ForEach(u => u.Acted = false);
+            UnitCommand Drop(int tx, int ty, int dx, int dy) => new UnitCommand { Army = Army.Red, UnitId = apc.Id, ToX = tx, ToY = ty, Action = UnitAction.Unload, CargoId = inf.Id, DropX = dx, DropY = dy };
+            Assert.IsNotNull(RulesEngine.Check(s, Drop(1, 0, 0, 0)), "the APC stands on a bridge");
+            Assert.IsNotNull(RulesEngine.Check(s, Drop(2, 1, 2, 0)), "forest is not an unloading tile");
+            Assert.IsNull(RulesEngine.Check(s, Drop(1, 1, 0, 1)), "plains to plains is fine");
         }
 }
 }

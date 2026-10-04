@@ -240,6 +240,68 @@ namespace FamiconWars.Tests
         }
 
         [Test]
+        public void CapturerCapturesFirstThenGetsJoinedForCover()
+        {
+            var g = Data();
+            var text = "[tiles]\n......\n..C...\n......\n[owners]\n......\n......\n......\n[units]\nINF,Red,2,1,30\nINF,Red,2,2,70\nINF,Blue,5,0,100\n";
+            var s = GameState.Create(g, MapDef.Parse(text, g), 3);
+            s.Active = Army.Red;
+            var cap = s.UnitAt(2, 1);
+            int ci = s.Index(2, 1);
+            s.CapturingUnit[ci] = cap.Id;
+            s.CaptureProgress[ci] = 4;
+            var ai = new AiPlayer(Army.Red, AiProfile.ForLevel(3), 1);
+            var c1 = ai.Next(s) as UnitCommand;
+            Assert.IsNotNull(c1);
+            Assert.AreEqual(cap.Id, c1.UnitId, "the capturer acts first");
+            Assert.AreEqual(UnitAction.Capture, c1.Action);
+            Assert.IsTrue(RulesEngine.Apply(s, c1).Ok);
+            int prog = s.CaptureProgress[ci];
+            var c2 = ai.Next(s) as UnitCommand;
+            Assert.IsNotNull(c2);
+            Assert.AreEqual(UnitAction.Join, c2.Action, "then the other squad joins it for cover");
+            Assert.AreEqual(2, c2.ToX); Assert.AreEqual(1, c2.ToY);
+            Assert.IsTrue(RulesEngine.Apply(s, c2).Ok);
+            Assert.AreEqual(cap.Id, s.CapturingUnit[ci], "joining keeps the capture gauge");
+            Assert.AreEqual(prog, s.CaptureProgress[ci]);
+        }
+
+        static int LateInfantry(int lateRange)
+        {
+            var g = Data();
+            var text = "[tiles]\nH...............\nX....C..........\n................\n[owners]\nr...............\nr...............\n................\n[units]\nINF,Red,15,0,100\nINF,Red,15,2,100\nINF,Blue,15,1,100\n";
+            int inf = 0;
+            for (uint seed = 1; seed <= 20; seed++)
+            {
+                var s = GameState.Create(g, MapDef.Parse(text, g), seed);
+                s.Active = Army.Red;
+                s.Day = 15;
+                s.Funds[(int)Army.Red] = 30000;
+                foreach (var u in s.Units) if (u.Army == Army.Red) u.Acted = true;
+                var prof = AiProfile.ForLevel(3);
+                prof.EcoLateCapRange = lateRange;
+                var ai = new AiPlayer(Army.Red, prof, seed);
+                for (int n = 0; n < 10; n++)
+                {
+                    var c = ai.Next(s);
+                    if (c is ProduceCommand pc) { if (g.Unit(pc.UnitType).Capture >= 2) inf++; break; }
+                    if (c == null || !RulesEngine.Apply(s, c).Ok) break;
+                    if (s.Active != Army.Red) break;
+                }
+            }
+            return inf;
+        }
+
+        [Test]
+        public void LateGameStillBuildsACapturerForANearbyProperty()
+        {
+            int on = LateInfantry(8), off = LateInfantry(0);
+            UnityEngine.Debug.Log("late capturer: on " + on + " / off " + off);
+            Assert.GreaterOrEqual(on, 15);
+            Assert.Greater(on, off);
+        }
+
+        [Test]
         public void ComNeverMovesOutOfTurnAndEndsItsPhase()
         {
             var r = Play(2, 3, 7, 3);
