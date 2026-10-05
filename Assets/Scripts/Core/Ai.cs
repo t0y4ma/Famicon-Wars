@@ -53,6 +53,8 @@ namespace FamiconWars.Core
         public float EcoSlotFrom = 0.4f;     // fraction of the unit limit where slot pressure starts (full at +0.5)
         public bool RotateWeak = true;
         public int EcoLateCapRange = 8;      // any day: build a capturer for a property this close that no own infantry is nearer to (0 = off)
+        public bool KeepBarricade = true;      // a unit keeping an enemy off a capturing squad does not leave for less than that is worth
+        public bool StrategicBuy = true;       // buy (or save up for) an aircraft or warship when the situation calls for one
         public bool JoinAfterAct = true;       // only join units that have already acted this phase
         public bool JoinCapture = true;        // join a capturing squad: the capture gauge is kept, so the capture finishes sooner
         public bool TransportTactics = true;   // early: a truck carries infantry to far properties; afterwards it stands in front of them as a wall       // a battered front unit steps back so a fresh one can take its tile      // infantry share / quality rules apply only once the army reaches this fraction of the unit limit (0 = always)
@@ -110,7 +112,7 @@ namespace FamiconWars.Core
             int key = s.Day * 2 + (int)s.Active;
             if (key != phaseKey)
             {
-                phaseKey = key; commandsThisPhase = 0; resupplyConsidered = false; savingThisPhase = false; lateCapThisPhase = false;
+                phaseKey = key; commandsThisPhase = 0; resupplyConsidered = false; savingThisPhase = false; lateCapThisPhase = false; strategicPlanned = false; strategic = null;
                 forceWait.Clear(); done.Clear(); productionTried.Clear();
             }
             if (++commandsThisPhase > 300) return new EndPhaseCommand { Army = Army };
@@ -262,6 +264,22 @@ namespace FamiconWars.Core
 
         Command ChooseProduction(GameState s)
         {
+            if (Profile.Has(AiFeature.Economy) && Profile.StrategicBuy && !strategicPlanned)
+            {
+                strategicPlanned = true;
+                strategic = PlanStrategic(s);
+            }
+            if (strategic != null)
+            {
+                var st = strategic.Value;
+                int skey = st.y * 4096 + st.x;
+                if (!productionTried.Contains(skey) && s.Funds[(int)Army] >= st.def.Price && RulesEngine.UnitCount(s, Army) < s.Rules.UnitLimit)
+                {
+                    productionTried.Add(skey);
+                    strategic = null;
+                    return new ProduceCommand { Army = Army, X = st.x, Y = st.y, UnitType = st.def.Id };
+                }
+            }
             // blue scans from the far corner so that both armies try their facilities in the same order
             // relative to the front on a point-symmetric map
             bool rev = Army == Army.Blue;
@@ -290,13 +308,16 @@ namespace FamiconWars.Core
             return n;
         }
 
-        bool savingThisPhase, lateCapThisPhase;
+        bool savingThisPhase, lateCapThisPhase, strategicPlanned;
+        (UnitDef def, int x, int y)? strategic;
         int reliefUnit = -1, reliefTile = -1;
 
         UnitDef PickUnit(GameState s, List<UnitDef> list, int fx, int fy)
         {
             int funds = s.Funds[(int)Army];
             if (savingThisPhase) return null;
+            // an aircraft or warship planned this phase is bought first: keep its price aside
+            if (strategic != null) funds -= strategic.Value.def.Price;
             var aff = list.FindAll(d => d.Price <= funds);
             if (aff.Count == 0) return null;
             if (Profile.Has(AiFeature.Economy)) return PickEconomic(s, list, aff, fx, fy);
@@ -489,6 +510,155 @@ namespace FamiconWars.Core
             float pick = rng.Range(0, 9999) / 10000f * sum;
             for (int k = 0; k < aff.Count; k++) { pick -= weights[k]; if (pick <= 0) return weights[k] > 0 ? aff[k] : bestAff; }
             return bestAff;
+        }
+
+        /// <summary>
+        /// Aircraft and warships come from their own facilities, which get only what the factories leave
+        /// over, so left to the per-facility picks they are almost never bought. Once per phase, decide
+        /// whether one is worth buying first, judged by what it is good at on the current battlefield:
+        /// an aircraft by its speed (enemies it reaches days before our ground army could), a warship by
+        /// long-range fire from the water (enemies it can shell from a tile nothing of theirs can hit).
+        /// Only what is affordable now; returns the unit and the facility to build it at, or null.
+        /// </summary>
+        (UnitDef def, int x, int y)? PlanStrategic(GameState s)
+        {
+            int funds = s.Funds[(int)Army];
+            if (RulesEngine.UnitCount(s, Army) >= s.Rules.UnitLimit - 1) return null;
+            if (s.Day < 6) return null;            // the capture race comes first
+            int n = s.Width * s.Height;
+
+            // how many days our ground army needs to reach each tile (from its units and factories)
+            var groundDays = new float[n];
+            for (int i = 0; i < n; i++) groundDays[i] = 99;
+            var src = new List<int>();
+            foreach (var u in s.Units)
+            {
+                if (u.Army != Army || u.IsCarried) continue;
+                var d = s.Def(u);
+                if (d.Domain == Domain.Ground && d.RangeMax > 0 && !d.IsIndirect) src.Add(s.Index(u.X, u.Y));
+            }
+            for (int y = 0; y < s.Height; y++)
+                for (int x = 0; x < s.Width; x++)
+                {
+                    var t = s.TerrainAt(x, y);
+                    if (t.Produces == Domain.Ground && s.Owner[s.Index(x, y)] == Army && RulesEngine.InProductionRange(s, Army, x, y)) src.Add(s.Index(x, y));
+                }
+            foreach (var mc in new[] { MoveClass.Vehicle, MoveClass.Foot })
+            {
+                float perDay = mc == MoveClass.Vehicle ? 5f : 3f;
+                var c = TerrainCost(s, mc, src);
+                for (int i = 0; i < n; i++) if (c[i] < Inf) groundDays[i] = Math.Min(groundDays[i], 1 + c[i] / perDay);   // +1: it has to be built first
+            }
+
+            var enemies = new List<UnitState>();
+            int ownAirSea = 0;
+            foreach (var u in s.Units)
+            {
+                var d = s.Def(u);
+                if (u.Army == Army) { if (d.Domain != Domain.Ground && d.RangeMax > 0 && d.CargoCapacity == 0) ownAirSea++; continue; }
+                if (!u.IsCarried) enemies.Add(u);
+            }
+            if (enemies.Count == 0) return null;
+
+            (UnitDef def, int x, int y)? best = null; float bestSc = 0; int bestTargets = 0;
+            for (int y = 0; y < s.Height; y++)
+                for (int x = 0; x < s.Width; x++)
+                {
+                    var t = s.TerrainAt(x, y);
+                    if (t.Produces == null || t.Produces.Value == Domain.Ground) continue;
+                    var list = RulesEngine.ProducibleAt(s, Army, x, y);
+                    if (list.Count == 0) continue;
+                    int[] seaCost = t.Produces.Value == Domain.Sea ? TerrainCost(s, MoveClass.Ship, new List<int> { s.Index(x, y) }) : null;
+                    foreach (var d in list)
+                    {
+                        if (d.RangeMax <= 0 || d.CargoCapacity > 0 || d.Price > funds) continue;
+                        float value = 0; int targets = 0;
+                        foreach (var e in enemies)
+                        {
+                            var ed = s.Def(e);
+                            int g = s.Data.BaseDamage(d, ed);
+                            if (g < 0) continue;
+                            float worth = Math.Min(g, e.Hp) / 100f * ed.Price;
+                            float wgt = 0;
+                            if (d.Domain == Domain.Air)
+                            {
+                                // speed: days the aircraft saves over the ground army (built now, flying from here)
+                                float airDays = 1 + Math.Max(0, Movement.Distance(x, y, e.X, e.Y) - 1) / (float)d.Move;
+                                float gain = groundDays[s.Index(e.X, e.Y)] - airDays;
+                                wgt = Clamp01((gain - 1) / 2f);
+                            }
+                            else if (seaCost != null)
+                                wgt = ShellingWeight(s, d, e, seaCost);
+                            if (wgt <= 0) continue;
+                            value += wgt * worth;
+                            if (wgt >= 0.5f) targets++;
+                        }
+                        float sc = value / d.Price;
+                        if (sc > bestSc) { bestSc = sc; best = (d, x, y); bestTargets = targets; }
+                    }
+                }
+            if (best == null || bestSc < 0.8f) return null;
+            // a few of them, as many as the good targets warrant
+            if (ownAirSea >= Math.Min(3, 1 + bestTargets / 4)) return null;
+            return best;
+        }
+
+        /// <summary>
+        /// 1 when the warship can reach (within two days) a sea tile from which it can shell e and that no
+        /// enemy can hit back at; less when every such tile is covered by something of theirs.
+        /// </summary>
+        float ShellingWeight(GameState s, UnitDef d, UnitState e, int[] seaCost)
+        {
+            float bestW = 0;
+            int r = d.RangeMax;
+            for (int y = e.Y - r; y <= e.Y + r; y++)
+                for (int x = e.X - r; x <= e.X + r; x++)
+                {
+                    if (!s.InBounds(x, y)) continue;
+                    int dist = Movement.Distance(x, y, e.X, e.Y);
+                    if (dist < d.RangeMin || dist > d.RangeMax) continue;
+                    int i = s.Index(x, y);
+                    if (seaCost[i] >= Inf || seaCost[i] > d.Move * 2) continue;
+                    int threats = 0;
+                    foreach (var o in s.Units)
+                    {
+                        if (o.Army == Army || o.IsCarried) continue;
+                        var od = s.Def(o);
+                        if (od.RangeMax <= 0 || s.Data.BaseDamage(od, d) < 0) continue;
+                        int od2 = Movement.Distance(o.X, o.Y, x, y);
+                        if (od.IsIndirect ? od2 >= od.RangeMin && od2 <= od.RangeMax : od2 <= od.Move + od.RangeMax) threats++;
+                    }
+                    float w = threats == 0 ? 1f : 0.3f / threats;
+                    if (w > bestW) bestW = w;
+                }
+            return bestW;
+        }
+
+        /// <summary>Movement cost from the given tiles over terrain only (units ignored).</summary>
+        static int[] TerrainCost(GameState s, MoveClass mc, List<int> sources)
+        {
+            int n = s.Width * s.Height;
+            var cost = new int[n];
+            for (int i = 0; i < n; i++) cost[i] = Inf;
+            var q = new SortedSet<(int c, int i)>();
+            foreach (var i in sources) if (cost[i] != 0) { cost[i] = 0; q.Add((0, i)); }
+            while (q.Count > 0)
+            {
+                var cur = q.Min; q.Remove(cur);
+                int x = cur.i % s.Width, y = cur.i / s.Width;
+                for (int k = 0; k < 4; k++)
+                {
+                    int nx = x + (k == 0 ? 1 : k == 1 ? -1 : 0), ny = y + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                    if (!s.InBounds(nx, ny)) continue;
+                    int tc = s.TerrainAt(nx, ny).Cost[(int)mc];
+                    if (tc <= 0) continue;
+                    int ni = s.Index(nx, ny), nc = cur.c + tc;
+                    if (nc >= cost[ni]) continue;
+                    if (cost[ni] < Inf) q.Remove((cost[ni], ni));
+                    cost[ni] = nc; q.Add((nc, ni));
+                }
+            }
+            return cost;
         }
 
         static float Clamp01(float v) => v < 0 ? 0 : v > 1 ? 1 : v;
@@ -860,6 +1030,111 @@ namespace FamiconWars.Core
 
             // ---------- scoring terms ----------
 
+            readonly Dictionary<int, List<(UnitState c, UnitState e, int with, float g)>> keepPairs = new Dictionary<int, List<(UnitState, UnitState, int, float)>>();
+            readonly Dictionary<long, float> leaveCosts = new Dictionary<long, float>();
+
+            /// <summary>
+            /// Enemies cannot pass through our units, so a unit can be what keeps an enemy away from one of
+            /// our capturing squads. Cost of u moving to dest: for each enemy direct-fire ground unit that
+            /// could then reach a tile next to a capturer (and cannot now), what its attack would cost the
+            /// capture; a little if the move only opens one more attack spot. Moving along the barricade
+            /// costs nothing; leaving it for a kill worth more than the capture still happens.
+            /// </summary>
+            float LeaveCost(UnitState u, int dest)
+            {
+                long key = (long)u.Id * 100000 + dest;
+                if (leaveCosts.TryGetValue(key, out var cached)) return cached;
+                if (!keepPairs.TryGetValue(u.Id, out var pairs))
+                {
+                    pairs = new List<(UnitState, UnitState, int, float)>();
+                    int goal = s.Rules.CaptureGoal;
+                    foreach (var c in s.Units)
+                    {
+                        if (c.Army != me || c.IsCarried || c.Id == u.Id) continue;
+                        int ci = s.Index(c.X, c.Y);
+                        if (s.CapturingUnit[ci] != c.Id || Movement.Distance(u.X, u.Y, c.X, c.Y) > 6) continue;
+                        var cd = s.Def(c);
+                        float pv = PropValue(ci);
+                        foreach (var e in s.Units)
+                        {
+                            if (e.Army != foe || e.IsCarried || e.Ammo <= 0) continue;
+                            var ed = s.Def(e);
+                            if (ed.Domain != Domain.Ground || ed.IsIndirect || ed.RangeMax < 1 || s.Data.BaseDamage(ed, cd) < 0) continue;
+                            if (Movement.Distance(e.X, e.Y, c.X, c.Y) > ed.Move + 1) continue;
+                            int with = AttackSpots(EnemyStops(e, ed, -1, -1), c);
+                            // does u matter to this enemy at all?
+                            if (AttackSpots(EnemyStops(e, ed, u.Id, -1), c) <= with) continue;
+                            int dmg = Combat.BaseRoll(s, e, e.Hp, c, c.X, c.Y, false) + 4;
+                            float g = 0.6f * pv * Math.Min(1f, dmg / (float)Math.Max(1, c.Hp)) * Math.Min(1f, (s.CaptureProgress[ci] + c.Count) / (float)goal + 0.3f)
+                                      + Math.Min(dmg, c.Hp) / 100f * cd.Price;
+                            pairs.Add((c, e, with, g));
+                        }
+                    }
+                    keepPairs[u.Id] = pairs;
+                }
+                float v = 0;
+                foreach (var pr in pairs)
+                {
+                    int after = AttackSpots(EnemyStops(pr.e, s.Def(pr.e), u.Id, dest), pr.c);
+                    if (after <= pr.with) continue;
+                    v += pr.with == 0 ? pr.g : 0.15f * pr.g;
+                }
+                leaveCosts[key] = v;
+                return v;
+            }
+
+            /// <summary>Tiles an enemy could end its move on (cost within its move); one of our units can be
+            /// left out (ignoreId) or stand somewhere else (blockAt).</summary>
+            Dictionary<int, int> EnemyStops(UnitState e, UnitDef ed, int ignoreId, int blockAt)
+            {
+                var cost = new Dictionary<int, int>();
+                int start = s.Index(e.X, e.Y);
+                cost[start] = 0;
+                var open = new List<int> { start };
+                int budget = Math.Min(ed.Move, e.Fuel);
+                while (open.Count > 0)
+                {
+                    int bi = 0;
+                    for (int k = 1; k < open.Count; k++) if (cost[open[k]] < cost[open[bi]]) bi = k;
+                    int cur = open[bi]; open.RemoveAt(bi);
+                    int x = cur % w, y = cur / w;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        int nx = x + (k == 0 ? 1 : k == 1 ? -1 : 0), ny = y + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                        if (!s.InBounds(nx, ny)) continue;
+                        int ni = s.Index(nx, ny);
+                        if (ni == blockAt) continue;
+                        int tc = s.TerrainAt(nx, ny).Cost[(int)ed.MoveClass];
+                        if (tc <= 0) continue;
+                        var o = s.UnitAt(nx, ny);
+                        if (o != null && o.Id == ignoreId) o = null;
+                        if (o != null && o.Army != e.Army) continue;     // cannot pass through us
+                        int nc = cost[cur] + tc;
+                        if (nc > budget) continue;
+                        if (cost.TryGetValue(ni, out var old) && old <= nc) continue;
+                        cost[ni] = nc; open.Add(ni);
+                    }
+                }
+                // only empty tiles (or where it already stands) can be stopped on
+                var stops = new Dictionary<int, int>();
+                foreach (var kv in cost)
+                {
+                    var o = s.UnitAt(kv.Key % w, kv.Key / w);
+                    if (kv.Key == blockAt) continue;
+                    if (kv.Key == start || o == null || o.Id == ignoreId) stops[kv.Key] = kv.Value;
+                }
+                return stops;
+            }
+
+            int AttackSpots(Dictionary<int, int> stops, UnitState c)
+            {
+                int n = 0;
+                foreach (var kv in stops) if (IsAttackSpot(kv.Key, c)) n++;
+                return n;
+            }
+
+            bool IsAttackSpot(int i, UnitState c) => Movement.Distance(i % w, i / w, c.X, c.Y) == 1;
+
             float Positional(UnitState u, UnitDef d, int start, int dest, int moveCost, int hp)
             {
                 float sc = 0;
@@ -900,6 +1175,9 @@ namespace FamiconWars.Core
                 }
                 if (p.Has(AiFeature.Formation) && hp <= 60 && t.IsProperty && s.Owner[dest] == me && t.Supplies == d.Domain)
                     sc += d.Price * 0.25f * (100 - hp) / 100f;   // battered units head for a city to be repaired
+                // don't walk out of a barricade that is keeping an enemy off one of our capturing squads
+                if (p.Has(AiFeature.Formation) && p.KeepBarricade && d.Domain == Domain.Ground && dest != start)
+                    sc -= LeaveCost(u, dest);
                 if (p.Has(AiFeature.Formation) && d.Domain == Domain.Ground && dest != start)
                 {
                     // don't park on a bridge or in a one-tile lane: everyone behind gets stuck

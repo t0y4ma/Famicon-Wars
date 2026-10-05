@@ -25,7 +25,7 @@ namespace FamiconWars.Tests
             mapText = File.ReadAllText(Path.Combine(Application.dataPath, "Resources/Maps/map01.txt"));
             inbox = new Dictionary<int, List<ServerMsg>>();
             seed = 99;
-            server = new OnlineRoomServer(data, id => id == "map01" ? MapDef.Parse(mapText, data) : null,
+            server = new OnlineRoomServer(data, id => id == "map01" || id == "map05" ? MapDef.Parse(id == "map01" ? mapText : File.ReadAllText(Path.Combine(Application.dataPath, "Resources/Maps/map05.txt")), data) : null,
                 (c, m) => { if (!inbox.TryGetValue(c, out var l)) inbox[c] = l = new List<ServerMsg>(); l.Add(m); },
                 () => seed = seed * 1664525u + 1013904223u, 1);
         }
@@ -33,11 +33,13 @@ namespace FamiconWars.Tests
         List<ServerMsg> Box(int c) => inbox.TryGetValue(c, out var l) ? l : (inbox[c] = new List<ServerMsg>());
         T Last<T>(int c) where T : ServerMsg => Box(c).OfType<T>().LastOrDefault();
 
+        /// <summary>Host (conn 1) creates, a second player (conn 2) joins into the free blue seat, the host starts.</summary>
         string StartMatch()
         {
-            server.Create(1, "tokA", "map01");
+            server.Create(1, "tokA", "Aさん", "map01");
             var code = Last<RoomStatus>(1).Code;
-            server.Join(2, code, "tokB");
+            server.Join(2, code, "tokB", "Bさん");
+            server.Action(1, "start", 0, null);
             return code;
         }
 
@@ -60,10 +62,8 @@ namespace FamiconWars.Tests
             for (int step = 0; step < 3000 && !room.State.GameOver && room.State.Day <= 12; step++)
             {
                 int seat = (int)room.State.Active;
-                // each player decides on its own replica, like a real client
-                var cmd = ais[seat].Next(reps[seat].State);
+                var cmd = ais[seat].Next(reps[seat].State);      // each player decides on its own replica
                 server.Play(seat + 1, CommandCodec.Encode(cmd));
-                var rej = Box(seat + 1).Skip(0).OfType<Rejected>().Count();
                 var applied = Box(1).OfType<Applied>().ToList();
                 if (applied.Count == seen) { ais[seat].Rejected(cmd); continue; }
                 for (; seen < applied.Count; seen++)
@@ -78,6 +78,93 @@ namespace FamiconWars.Tests
         }
 
         [Test]
+        public void RoomShowsSeatsHostAndSpectators()
+        {
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Join(2, code, "tokB", "Bさん");
+            server.Join(3, code, "tokC", "Cさん");
+            var st = Last<RoomStatus>(3);
+            Assert.AreEqual(-1, st.MySeat, "seats are full: the third member watches");
+            Assert.AreEqual(SeatKind.Human, st.SeatKinds[0]); Assert.AreEqual("Aさん", st.SeatNames[0]);
+            Assert.AreEqual(SeatKind.Human, st.SeatKinds[1]); Assert.AreEqual("Bさん", st.SeatNames[1]);
+            Assert.AreEqual(Last<RoomStatus>(1).MyId, st.HostId);
+            Assert.AreEqual(3, st.MemberIds.Length);
+
+            server.Action(2, "stand", 0, null);
+            Assert.AreEqual(SeatKind.Empty, Last<RoomStatus>(1).SeatKinds[1]);
+            server.Action(3, "sit", 1, null);
+            Assert.AreEqual(1, Last<RoomStatus>(3).MySeat);
+            server.Action(2, "sit", 1, null);
+            Assert.IsNotNull(Last<LobbyError>(2), "a taken seat cannot be taken");
+        }
+
+        [Test]
+        public void OnlyTheHostSetsTheMapAndBotsAndStarts()
+        {
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Join(2, code, "tokB", "Bさん");
+            server.Action(2, "map", 0, "map05");
+            Assert.IsNotNull(Last<LobbyError>(2));
+            server.Action(2, "start", 0, null);
+            Assert.IsFalse(server.Find(code).Started);
+            server.Action(1, "map", 0, "map05");
+            Assert.AreEqual("map05", Last<RoomStatus>(2).MapId);
+            server.Action(1, "bot", 1, "3");
+            Assert.IsNotNull(Last<LobbyError>(1), "a person sits there");
+            server.Action(2, "stand", 0, null);
+            server.Action(1, "bot", 1, "3");
+            var st = Last<RoomStatus>(2);
+            Assert.AreEqual(SeatKind.Bot, st.SeatKinds[1]);
+            Assert.AreEqual(3, st.SeatLevels[1]);
+            server.Action(1, "start", 0, null);
+            Assert.IsTrue(server.Find(code).Started);
+            Assert.AreEqual(-1, Last<GameLog>(2).MyArmy, "the member who stood up watches");
+        }
+
+        [Test]
+        public void HostRoleCanBeHandedOverAndPassesOnWhenTheHostLeaves()
+        {
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Join(2, code, "tokB", "Bさん");
+            server.Join(3, code, "tokC", "Cさん");
+            int idA = Last<RoomStatus>(1).MyId, idC = Last<RoomStatus>(3).MyId;
+            server.Action(2, "host", idC, null);
+            Assert.IsNotNull(Last<LobbyError>(2), "only the host hands the role over");
+            server.Action(1, "host", idC, null);
+            Assert.AreEqual(idC, Last<RoomStatus>(1).HostId);
+            server.Leave(3, true);
+            Assert.AreEqual(idA, Last<RoomStatus>(1).HostId, "a seated player inherits the host role");
+        }
+
+        [Test]
+        public void BotSeatPlaysByItselfAndSpectatorsWatch()
+        {
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Action(1, "bot", 1, "1");
+            server.Action(1, "start", 0, null);
+            server.Join(5, code, "tokS", "観戦者");
+            Assert.AreEqual(-1, Last<GameLog>(5).MyArmy);
+            var room = server.Find(code);
+            var watch = ReplicaFrom(Last<GameLog>(5));
+            double t = 0;
+            for (int day = 0; day < 3; day++)
+            {
+                server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+                for (int k = 0; k < 400 && room.State.Active == Army.Blue && !room.GameOver; k++) server.Tick(t += 1);
+                Assert.AreEqual(Army.Red, room.State.Active, "the BOT ends its phase");
+            }
+            server.Play(5, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+            Assert.IsNotNull(Last<Rejected>(5), "a spectator cannot play");
+            foreach (var a in Box(5).OfType<Applied>()) Assert.IsNotNull(watch.Step(a.Index, a.Cmd, a.Seed, a.Hash));
+            Assert.AreEqual(CommandCodec.Hash(room.State), CommandCodec.Hash(watch.State));
+            Assert.Greater(room.Cmds.Count, 6, "the BOT did more than just end its phases");
+        }
+
+        [Test]
         public void ReturningPlayerGetsTheSeatAndTheWholeGame()
         {
             var code = StartMatch();
@@ -85,26 +172,31 @@ namespace FamiconWars.Tests
             server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
             server.Play(2, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Blue }));
             server.Disconnected(2);
-            Assert.IsFalse(Last<RoomStatus>(1).OpponentPresent);
-            server.Join(7, code, "stranger");
-            Assert.IsNotNull(Last<LobbyError>(7), "a new player cannot take a seat mid-game");
-            server.Join(8, code, "tokB");
+            Assert.IsFalse(Last<RoomStatus>(1).SeatOnline[1]);
+            server.Join(7, code, "stranger", "x");
+            Assert.AreEqual(-1, Last<GameLog>(7).MyArmy, "a newcomer mid-game watches");
+            server.Join(8, code, "tokB", "Bさん");
             var log = Last<GameLog>(8);
             Assert.AreEqual(1, log.MyArmy);
             Assert.AreEqual(2, log.Cmds.Length);
             Assert.AreEqual(CommandCodec.Hash(room.State), CommandCodec.Hash(ReplicaFrom(log).State));
-            Assert.IsTrue(Last<RoomStatus>(1).OpponentPresent);
+            Assert.IsTrue(Last<RoomStatus>(1).SeatOnline[1]);
         }
 
         [Test]
-        public void LeavingMidGameIsASurrender()
+        public void LeavingMidGameIsASurrenderAndTheHostCanReopenTheRoom()
         {
             var code = StartMatch();
-            server.Leave(1, true);
+            server.Leave(2, true);
             var room = server.Find(code);
             Assert.IsTrue(room.State.GameOver);
-            Assert.AreEqual(Army.Blue, room.State.Winner);
-            Assert.IsNotNull(Last<LeftRoom>(1));
+            Assert.AreEqual(Army.Red, room.State.Winner);
+            Assert.IsNotNull(Last<LeftRoom>(2));
+            server.Action(1, "reset", 0, null);
+            var st = Last<RoomStatus>(1);
+            Assert.IsFalse(st.Started);
+            Assert.AreEqual(0, st.MySeat);
+            Assert.AreEqual(SeatKind.Empty, st.SeatKinds[1]);
         }
 
         [Test]

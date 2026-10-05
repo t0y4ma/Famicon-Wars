@@ -302,6 +302,37 @@ namespace FamiconWars.Tests
         }
 
         [Test]
+        public void BarricadeDoesNotLeaveForACheapKill()
+        {
+            // a corridor between mountains: the squad at (3,1) is all that keeps the tank off the capturer;
+            // a battered enemy rifle squad at (1,0) could be finished from (1,1), but that opens the corridor
+            var g = Data();
+            var text = "[tiles]\n^.^^^^^\n..C....\n^^^^^^^\n[owners]\n.......\n.......\n.......\n[units]\nINF,Red,2,1,100\nINF,Red,3,1,100\nTANK_B,Blue,6,1,100\nINF,Blue,1,0,20\n";
+            var s = GameState.Create(g, MapDef.Parse(text, g), 3);
+            s.Active = Army.Red;
+            var cap = s.UnitAt(2, 1);
+            int ci = s.Index(2, 1);
+            s.CapturingUnit[ci] = cap.Id; s.CaptureProgress[ci] = 10; cap.Acted = true;
+            var c = new AiPlayer(Army.Red, AiProfile.ForLevel(3), 1).Next(s) as UnitCommand;
+            Assert.IsNotNull(c);
+            Assert.GreaterOrEqual(c.ToX, 3, "stays in the corridor between the tank and the capturer");
+        }
+
+        [Test]
+        public void ComBuysABomberWhenEnemiesHoldAnIsland()
+        {
+            var g = Data();
+            var text = "[tiles]\nHXA~~~~...\n.....~~.C.\n.....~~...\n[owners]\nrrr.......\n..........\n..........\n[units]\nTANK_B,Blue,8,0,100\nTANK_B,Blue,7,1,100\nTANK_B,Blue,9,1,100\nTANK_B,Blue,7,2,100\nINF,Blue,8,2,100\nINF,Red,3,2,100\n";
+            var s = GameState.Create(g, MapDef.Parse(text, g), 3);
+            s.Active = Army.Red; s.Day = 10; s.Funds[(int)Army.Red] = 30000;
+            foreach (var u in s.Units) if (u.Army == Army.Red) u.Acted = true;
+            var c = new AiPlayer(Army.Red, AiProfile.ForLevel(3), 1).Next(s) as ProduceCommand;
+            Assert.IsNotNull(c);
+            Assert.AreEqual(Domain.Air, g.Unit(c.UnitType).Domain, "the ground army cannot reach the island: an aircraft is bought first");
+            Assert.Greater(g.Unit(c.UnitType).RangeMax, 0);
+        }
+
+        [Test]
         public void ComNeverMovesOutOfTurnAndEndsItsPhase()
         {
             var r = Play(2, 3, 7, 3);

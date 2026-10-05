@@ -20,7 +20,7 @@ namespace FamiconWars.Sim
         static readonly object Gate = new object();
         static StreamWriter log;
 
-        public struct Result { public Army Winner; public int Day; public string Reason; public int[] Built, Inf, Hi, Truck, JoinCap; public double PressSum; public int PressN; }
+        public struct Result { public Army Winner; public int Day; public string Reason; public int[] Built, Inf, Hi, Truck, JoinCap, AirSea; public double PressSum; public int PressN; }
 
         /// <summary>Worker threads: FWSIM_THREADS if set, else half the cores (keeps the PC usable).</summary>
         static int Threads()
@@ -58,7 +58,7 @@ namespace FamiconWars.Sim
                 // each seed is played twice with sides swapped; games run in parallel
                 var jobs = new List<(uint seed, bool aRed)>();
                 for (uint sd = 1; sd <= seeds; sd++) { jobs.Add((sd, true)); jobs.Add((sd, false)); }
-                int aw = 0, bw = 0, dr = 0; int[] built = new int[2], inf = new int[2], hi = new int[2], truck = new int[2], jcap = new int[2];
+                int aw = 0, bw = 0, dr = 0; int[] built = new int[2], inf = new int[2], hi = new int[2], truck = new int[2], jcap = new int[2], airsea = new int[2];
                 Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = Threads() }, j =>
                 {
                     var r = j.aRed ? Play(m.A(), m.B(), j.seed, maxDays) : Play(m.B(), m.A(), j.seed, maxDays);
@@ -67,11 +67,11 @@ namespace FamiconWars.Sim
                     {
                         string w = r.Winner == Army.None ? "draw" : (int)r.Winner == ai ? "A" : "B";
                         if (w == "A") aw++; else if (w == "B") bw++; else dr++;
-                        built[0] += r.Built[ai]; built[1] += r.Built[1 - ai]; inf[0] += r.Inf[ai]; inf[1] += r.Inf[1 - ai]; hi[0] += r.Hi[ai]; hi[1] += r.Hi[1 - ai]; truck[0] += r.Truck[ai]; truck[1] += r.Truck[1 - ai]; jcap[0] += r.JoinCap[ai]; jcap[1] += r.JoinCap[1 - ai];
+                        built[0] += r.Built[ai]; built[1] += r.Built[1 - ai]; inf[0] += r.Inf[ai]; inf[1] += r.Inf[1 - ai]; hi[0] += r.Hi[ai]; hi[1] += r.Hi[1 - ai]; truck[0] += r.Truck[ai]; truck[1] += r.Truck[1 - ai]; jcap[0] += r.JoinCap[ai]; jcap[1] += r.JoinCap[1 - ai]; airsea[0] += r.AirSea[ai]; airsea[1] += r.AirSea[1 - ai];
                         Log($"  press≈{(r.PressN > 0 ? r.PressSum / r.PressN : 0):F2} [{m.Name}] seed{j.seed} A={(j.aRed ? "赤" : "青")} -> {w}  day{r.Day} {r.Reason}  built A{r.Built[ai]}(歩{r.Inf[ai]}) B{r.Built[1 - ai]}(歩{r.Inf[1 - ai]})");
                     }
                 });
-                var line = $"{m.Name}: A {aw} - {bw} B (draw {dr})   built A{built[0]}(歩{inf[0]} 高級{hi[0]} 輸{truck[0]} 占領合流{jcap[0]}) B{built[1]}(歩{inf[1]} 高級{hi[1]} 輸{truck[1]} 占領合流{jcap[1]})";
+                var line = $"{m.Name}: A {aw} - {bw} B (draw {dr})   built A{built[0]}(歩{inf[0]} 高級{hi[0]} 輸{truck[0]} 占領合流{jcap[0]} 空海{airsea[0]}) B{built[1]}(歩{inf[1]} 高級{hi[1]} 輸{truck[1]} 占領合流{jcap[1]} 空海{airsea[1]})";
                 summary.Add(line);
                 Log("= " + line);
             }
@@ -88,7 +88,7 @@ namespace FamiconWars.Sim
             var s = GameState.Create(data, MapDef.Parse(mapText, data), seed);
             RulesEngine.StartGame(s);
             var ais = new[] { new AiPlayer(Army.Red, red, seed * 7 + 1), new AiPlayer(Army.Blue, blue, seed * 13 + 5) };
-            var res = new Result { Winner = Army.None, Built = new int[2], Inf = new int[2], Hi = new int[2], Truck = new int[2], JoinCap = new int[2] };
+            var res = new Result { Winner = Army.None, Built = new int[2], Inf = new int[2], Hi = new int[2], Truck = new int[2], JoinCap = new int[2], AirSea = new int[2] };
             int commands = 0;
             while (!s.GameOver && s.Day <= maxDays && commands < 60000)
             {
@@ -102,7 +102,7 @@ namespace FamiconWars.Sim
                 var r = RulesEngine.Apply(s, c);
                 commands++;
                 if (!r.Ok) { ai.Rejected(c); continue; }
-                if (c is ProduceCommand pc) { res.PressSum += ai.Profile.LastPress; res.PressN++; res.Built[(int)pc.Army]++; if (pc.UnitType == "INF") res.Inf[(int)pc.Army]++; if (data.Unit(pc.UnitType).Price >= 5000) res.Hi[(int)pc.Army]++; if (pc.UnitType == "APC") res.Truck[(int)pc.Army]++; }
+                if (c is ProduceCommand pc) { res.PressSum += ai.Profile.LastPress; res.PressN++; res.Built[(int)pc.Army]++; if (pc.UnitType == "INF") res.Inf[(int)pc.Army]++; if (data.Unit(pc.UnitType).Price >= 5000) res.Hi[(int)pc.Army]++; if (pc.UnitType == "APC") res.Truck[(int)pc.Army]++; var pd = data.Unit(pc.UnitType); if (pd.Domain != Domain.Ground && pd.RangeMax > 0 && pd.CargoCapacity == 0) res.AirSea[(int)pc.Army]++; }
                 foreach (var e in r.Events) if (e is GameOverEvent go) res.Reason = go.Reason;
                 foreach (var u in s.Units)
                     if (!u.IsCarried && s.TerrainAt(u.X, u.Y).Cost[(int)s.Def(u).MoveClass] < 0)

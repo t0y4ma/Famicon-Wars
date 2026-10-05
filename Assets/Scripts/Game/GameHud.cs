@@ -251,6 +251,7 @@ namespace FamiconWars.Game
         public void ShowMatchChrome(bool on)
         {
             topBar.gameObject.SetActive(on);
+            ShowZoomWidget(on);
             if (!on) infoCard.gameObject.SetActive(false);
         }
 

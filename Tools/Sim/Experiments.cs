@@ -49,6 +49,16 @@ namespace FamiconWars.Sim
                 case "mirror":
                     Add("L3 vs L3", () => L(3), () => L(3));
                     break;
+                case "air":
+                    Add("L3 strategic vs L3 off", () => L(3), () => { var p = L(3); p.StrategicBuy = false; return p; });
+                    break;
+                case "block":
+                    Add("L3 keep vs L3 off", () => L(3), () => { var p = L(3); p.KeepBarricade = false; return p; });
+                    break;
+                case "top":
+                    Add("L4 vs L3", () => L(4), () => L(3));
+                    Add("L3 vs L2", () => L(3), () => L(2));
+                    break;
                 case "levels":
                     for (int a = 1; a <= 4; a++) for (int b = a + 1; b <= 4; b++) { int x = a, y = b; Add($"L{y} vs L{x}", () => L(y), () => L(x)); }
                     break;

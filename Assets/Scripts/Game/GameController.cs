@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using FamiconWars.Core;
@@ -44,6 +44,22 @@ namespace FamiconWars.Game
         int myArmy;
         OnlineReplica replica;
         string roomCode, pendingLobby, pendingCode;
+        RoomStatusMsg? room;                                   // last room status from the server
+
+        // the record of the match being played (感想戦): every command with the seed it was played with
+        readonly List<string> recCmds = new List<string>();
+        readonly List<uint> recSeeds = new List<uint>();
+        Rng recSeedRng = new Rng(1);
+        string recMapId;
+        bool recSaved;
+        MatchRecord lastRecord;
+        // reviewing a record
+        bool replaying, replayAuto;
+        MatchRecord replayRec;
+        int replayIndex;
+        float replayNext;
+        string replayFrom;                                     // "gameover" or "records"
+        readonly Queue<AppliedMsg> incoming = new Queue<AppliedMsg>();   // played one by one, after each animation
         // test bot: "-fwbot <address> <code>" joins a room and lets the COM play this side (also settable from the editor)
         public int onlineBotLevel;
         AiPlayer onlineBot;
@@ -78,14 +94,31 @@ namespace FamiconWars.Game
             hud.OnMapNext += ShowSetup;
             hud.OnSetupBack += ShowMapSelect;
             hud.OnSetupStart += () => { settings.Save(); StartMatch(); };
-            hud.OnRestart += () => { if (online) { LeaveOnline(); ShowOnlineLobby(); } else ShowSetup(); };
+            hud.OnRestart += () => { if (online) BackToRoom(); else ShowSetup(); };
             hud.OnBackToTitle += () => { if (online || FwClient.IsConnected) { LeaveOnline(); FwClient.Disconnect(); } ShowTitle(); };
 
             hud.OnTitleOnline += ShowOnlineLobby;
             hud.OnOnlineBack += () => { FwClient.Disconnect(); ShowTitle(); };
             hud.OnOnlineCreate += addr => OnlineGo(addr, "create", null);
             hud.OnOnlineJoin += (addr, code) => OnlineGo(addr, "join", code);
-            hud.OnOnlineCancel += () => { if (FwClient.IsConnected) FwClient.LeaveRoom(); ShowOnlineLobby(); };
+            hud.OnGameOverReplay += () => { if (lastRecord != null) StartReplay(lastRecord, "gameover"); else hud.Toast("この対戦の記録がありません", true); };
+            hud.OnTitleRecords += ShowRecordsScreen;
+            hud.OnRecordsBack += ShowTitle;
+            hud.OnRecordPick += i => { var list = MatchRecords.Load(); if (i >= 0 && i < list.Count) StartReplay(list[i], "records"); };
+            hud.OnRecordDelete += i => { MatchRecords.Delete(i); ShowRecordsScreen(); };
+            hud.OnReplayStep += d => { replayAuto = false; if (d > 0) ReplayForward(true); else ReplayGoto(replayIndex - 1); };
+            hud.OnReplayPhase += d => { replayAuto = false; ReplayPhase(d); };
+            hud.OnReplayEdge += d => { replayAuto = false; ReplayGoto(d < 0 ? 0 : replayRec.cmds.Length); };
+            hud.OnReplayAuto += () => { replayAuto = !replayAuto; replayNext = 0; ReplayInfo(null); };
+            hud.OnReplayExit += ExitReplay;
+            hud.OnZoomReset += ResetCamera;
+            hud.OnRoomSit += seat => FwClient.RoomAction("sit", seat);
+            hud.OnRoomStand += () => FwClient.RoomAction("stand");
+            hud.OnRoomBot += (seat, level) => FwClient.RoomAction("bot", seat, level.ToString());
+            hud.OnRoomHost += id => FwClient.RoomAction("host", id);
+            hud.OnRoomMap += StepRoomMap;
+            hud.OnRoomStart += () => FwClient.RoomAction(room.HasValue && room.Value.started ? "reset" : "start");
+            hud.OnRoomLeave += () => { if (FwClient.IsConnected) FwClient.LeaveRoom(); roomCode = null; room = null; ShowOnlineLobby(); };
             FwClient.Connected += OnNetConnected;
             FwClient.Disconnected += OnNetDisconnected;
             FwClient.Error += OnNetError;
@@ -122,6 +155,9 @@ namespace FamiconWars.Game
             aiRunning = false; paused = false;
             selected = null;
             mode = Mode.Screens;
+            replaying = false; replayAuto = false;
+            hud.ShowReplayBar(false);
+            camKey = null;              // the next board starts with a fresh view
             hud.SkipBattle();
             hud.ResetScreens();
             hud.ShowMatchChrome(false);
@@ -192,6 +228,8 @@ namespace FamiconWars.Game
             for (int a = 0; a < 2; a++)
                 ai[a] = settings.Players[a] > 0 ? new AiPlayer((Army)a, AiProfile.ForLevel(settings.Players[a]), seed + (uint)a * 977u) : null;
             LoadMap(settings.MapId);
+            recMapId = settings.MapId; recCmds.Clear(); recSeeds.Clear(); recSaved = false;
+            recSeedRng = new Rng((uint)System.Environment.TickCount | 1u);
             hud.ShowMatchChrome(true);
             mode = Mode.Idle;
             var r = RulesEngine.StartGame(state);
@@ -214,6 +252,17 @@ namespace FamiconWars.Game
             SetupCamera();
         }
 
+        // ---- camera: zoom with the wheel, scroll by holding the cursor at a screen edge ----
+        // Zoom and scrolling are free as long as the board still covers at least a fifth of the screen
+        // (it may hang off the screen); the reset button returns to the starting view.
+        const float CamMinSize = 2.5f;       // closest zoom (about 5 rows on screen)
+        const float MinTilePx = 46f;         // a big map starts zoomed in so units stay this big at least
+        const float EdgePx = 14f;            // cursor this close to a screen edge scrolls
+        const float MinBoardShare = 0.2f;    // the board must cover at least this much of the screen
+        float camFit, camSize, camHome;
+        Vector3 camGoal, camHomePos;
+        string camKey;
+
         void SetupCamera()
         {
             cam = Camera.main;
@@ -222,16 +271,137 @@ namespace FamiconWars.Game
             cam.backgroundColor = new Color(0.07f, 0.08f, 0.07f);
             cam.transform.rotation = Quaternion.identity;
             float aspect = (float)Screen.width / Mathf.Max(1, Screen.height);
-            cam.orthographicSize = Mathf.Max(state.Height / 2f + 1.3f, (state.Width / 2f + 0.5f) / aspect);
-            // leave room for the 76px top bar (about 7% of the height)
-            cam.transform.position = new Vector3((state.Width - 1) / 2f, -(state.Height - 1) / 2f + cam.orthographicSize * 0.07f, -10);
+            // the whole board (with room for the top bar, and for the control bar when reviewing)
+            camFit = Mathf.Max(state.Height / 2f + 1.3f, (state.Width / 2f + 0.5f) / aspect) * (replaying ? 1.16f : 1f);
+            string key = state.Width + "x" + state.Height + (replaying ? "r" : "");
+            if (key == camKey && camSize > 0)
+            {
+                // same board rebuilt (e.g. jumping through a replay): keep the view
+                cam.orthographicSize = camSize;
+                cam.transform.position = camGoal;
+                ShowZoom();
+                return;
+            }
+            camKey = key;
+            float readable = Screen.height / (2f * MinTilePx);
+            camSize = Mathf.Clamp(Mathf.Min(camFit, readable), CamMinSize, Mathf.Max(CamMinSize, camFit));
+            cam.orthographicSize = camSize;
+            var center = new Vector3((state.Width - 1) / 2f, -(state.Height - 1) / 2f + camSize * (replaying ? -0.06f : 0.07f), -10);
+            if (camSize < camFit - 0.01f)
+            {
+                // zoomed in: start at our own HQ
+                Army mine = online ? (myArmy >= 0 ? (Army)myArmy : Army.Red) : (ai[0] == null || ai[1] != null ? Army.Red : Army.Blue);
+                for (int i = 0; i < state.Owner.Length; i++)
+                    if (state.Owner[i] == mine && state.TerrainAt(i % state.Width, i / state.Width).Id == "HQ")
+                        center = new Vector3(i % state.Width, -(i / state.Width), -10);
+            }
+            camGoal = center;
+            cam.transform.position = camGoal;
+            camHome = camSize; camHomePos = camGoal;
+            ShowZoom();
+        }
+
+        /// <summary>Furthest zoom-out: the board then covers MinBoardShare of the screen.</summary>
+        float CamMaxSize => Mathf.Max(CamMinSize, Mathf.Sqrt(state.Width * state.Height / (4f * MinBoardShare * Mathf.Max(0.1f, cam.aspect))));
+
+        /// <summary>Share of the screen the board covers with the camera at p and half-height h.</summary>
+        float BoardShare(Vector3 p, float h)
+        {
+            float w = h * cam.aspect;
+            float ox = Mathf.Max(0, Mathf.Min(p.x + w, state.Width - 0.5f) - Mathf.Max(p.x - w, -0.5f));
+            float oy = Mathf.Max(0, Mathf.Min(p.y + h, 0.5f) - Mathf.Max(p.y - h, -(state.Height - 0.5f)));
+            return ox * oy / (4f * w * h);
+        }
+
+        /// <summary>Pulls the view back toward the board until the board covers enough of the screen.</summary>
+        Vector3 ClampCam(Vector3 p)
+        {
+            p.z = -10;
+            if (cam == null || state == null) return p;
+            float h = cam.orthographicSize;
+            if (BoardShare(p, h) >= MinBoardShare) return p;
+            var center = new Vector3((state.Width - 1) / 2f, -(state.Height - 1) / 2f, -10);
+            if (BoardShare(center, h) < MinBoardShare) return center;
+            float lo = 0, hi = 1;                  // fraction of the way from p to the centre
+            for (int i = 0; i < 14; i++)
+            {
+                float mid = (lo + hi) / 2;
+                if (BoardShare(Vector3.Lerp(p, center, mid), h) >= MinBoardShare) hi = mid; else lo = mid;
+            }
+            return Vector3.Lerp(p, center, hi);
+        }
+
+        void ShowZoom() => hud.SetZoom(Mathf.RoundToInt(camHome / Mathf.Max(0.01f, camSize) * 100f));
+
+        void ResetCamera()
+        {
+            if (cam == null || state == null) return;
+            camSize = camHome;
+            cam.orthographicSize = camSize;
+            camGoal = camHomePos;
+            ShowZoom();
+        }
+
+        void UpdateCamera()
+        {
+            var mouse = Mouse.current;
+            if (mouse == null) return;
+            float dt = Time.unscaledDeltaTime;
+            Vector2 mp = mouse.position.ReadValue();
+            bool inside = mp.x >= 0 && mp.y >= 0 && mp.x <= Screen.width && mp.y <= Screen.height;
+
+            // wheel: zoom around the point under the cursor
+            float wheel = mouse.scroll.ReadValue().y;
+            if (wheel != 0 && inside && !hud.PointerOverUi && !hud.BattlePlaying)
+            {
+                var before = cam.ScreenToWorldPoint(new Vector3(mp.x, mp.y, 10));
+                camSize = Mathf.Clamp(camSize * (wheel > 0 ? 0.87f : 1.15f), CamMinSize, CamMaxSize);
+                cam.orthographicSize = camSize;
+                var after = cam.ScreenToWorldPoint(new Vector3(mp.x, mp.y, 10));
+                var shift = before - after; shift.z = 0;
+                cam.transform.position = ClampCam(cam.transform.position + shift);
+                camGoal = ClampCam(camGoal + shift);
+                ShowZoom();
+            }
+
+            // cursor at a screen edge: scroll (faster when zoomed out)
+            if (inside && Application.isFocused && !hud.BattlePlaying)
+            {
+                var dir = Vector2.zero;
+                if (mp.x <= EdgePx) dir.x = -1; else if (mp.x >= Screen.width - EdgePx) dir.x = 1;
+                if (mp.y <= EdgePx) dir.y = -1; else if (mp.y >= Screen.height - EdgePx) dir.y = 1;
+                if (dir != Vector2.zero) camGoal = ClampCam(camGoal + (Vector3)(dir.normalized * camSize * 1.6f * dt));
+            }
+            cam.transform.position = Vector3.Lerp(cam.transform.position, camGoal, 1f - Mathf.Exp(-14f * dt));
+        }
+
+        /// <summary>Brings a tile into view if it is off screen (COM / opponent / replay moves).</summary>
+        void FocusOn(int x, int y)
+        {
+            if (cam == null || state == null) return;
+            float h = cam.orthographicSize - 1f, w = h * cam.aspect - 0.5f;
+            var c = camGoal;
+            if (Mathf.Abs(x - c.x) <= w && Mathf.Abs(-y - c.y) <= h) return;
+            camGoal = ClampCam(new Vector3(x, -y, -10));
+        }
+
+        void FocusOn(Command c)
+        {
+            if (c is UnitCommand uc)
+            {
+                var u = state.UnitById(uc.UnitId);
+                FocusOn(uc.ToX, uc.ToY);
+                if (u != null) FocusOn(u.X, u.Y);
+            }
+            else if (c is ProduceCommand pc) FocusOn(pc.X, pc.Y);
         }
 
         bool InMatch => state != null && mode != Mode.Screens;
-        bool ComTurn => InMatch && !online && !state.GameOver && ai[(int)state.Active] != null;
-        bool HumanTurn => InMatch && !state.GameOver && (online ? (int)state.Active == myArmy && !awaiting : ai[(int)state.Active] == null);
+        bool ComTurn => InMatch && !replaying && !online && !state.GameOver && ai[(int)state.Active] != null;
+        bool HumanTurn => InMatch && !replaying && !state.GameOver && (online ? myArmy >= 0 && (int)state.Active == myArmy && !awaiting && incoming.Count == 0 : ai[(int)state.Active] == null);
 
-        string ControllerName(Army a) => online ? ((int)a == myArmy ? "あなた" : "相手") : ai[(int)a] == null ? "人間" : "COM " + ai[(int)a].Profile.Name;
+        string ControllerName(Army a) => replaying ? (a == Army.Red ? replayRec.red : replayRec.blue) : online ? ((int)a == myArmy ? "あなた" : room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : "相手")
+            : ai[(int)a] == null ? "人間" : "COM " + ai[(int)a].Profile.Name;
 
         int Income(Army a)
         {
@@ -251,6 +421,9 @@ namespace FamiconWars.Game
         void Update()
         {
             if (!InMatch || cam == null) return;
+            UpdateCamera();
+            // moves from the server are shown one at a time, each after the previous animation
+            if (online && incoming.Count > 0 && !hud.BattlePlaying && !hud.BannerShowing) ApplyIncoming(incoming.Dequeue());
             if (online && onlineBot != null && HumanTurn && !hud.BattlePlaying && !hud.BannerShowing && Time.unscaledTime >= botNext)
             {
                 botNext = Time.unscaledTime + 0.15f;
@@ -264,6 +437,24 @@ namespace FamiconWars.Game
             if (hud.BattlePlaying)
             {
                 if ((mouse != null && mouse.leftButton.wasPressedThisFrame) || (kb != null && kb.spaceKey.wasPressedThisFrame)) hud.SkipBattle();
+                return;
+            }
+
+            if (replaying)
+            {
+                if (replayAuto && !hud.BannerShowing && Time.unscaledTime >= replayNext)
+                {
+                    if (replayIndex >= replayRec.cmds.Length) { replayAuto = false; ReplayInfo(null); }
+                    else { ReplayForward(true); replayNext = Time.unscaledTime + 0.35f; }
+                }
+                if (kb != null && kb.rightArrowKey.wasPressedThisFrame) { replayAuto = false; ReplayForward(true); }
+                if (kb != null && kb.leftArrowKey.wasPressedThisFrame) { replayAuto = false; ReplayGoto(replayIndex - 1); }
+                if (mouse != null)
+                {
+                    Vector2 rp = mouse.position.ReadValue();
+                    var rw = cam.ScreenToWorldPoint(new Vector3(rp.x, rp.y, 10));
+                    if (!hud.PointerOverUi) hud.ShowInfo(state, Mathf.RoundToInt(rw.x), Mathf.RoundToInt(-rw.y), null);
+                }
                 return;
             }
 
@@ -304,10 +495,11 @@ namespace FamiconWars.Game
                 if (cmd == null) break;
                 float d = GameSettings.SpeedDelay[Speed];
 
+                FocusOn(cmd);
                 if (d > 0) yield return ShowIntent(cmd, d);
 
                 var cast = BattleCast(cmd);
-                var r = RulesEngine.Apply(state, cmd);
+                var r = ApplyRecorded(cmd);
                 board.ClearHighlights();
                 if (!r.Ok) { com.Rejected(cmd); board.Refresh(); continue; }
                 bool battle = Report(r, cast);
@@ -584,7 +776,7 @@ namespace FamiconWars.Game
                 return true;
             }
             var cast = BattleCast(c);
-            var r = RulesEngine.Apply(state, c);
+            var r = ApplyRecorded(c);
             if (!r.Ok) { hud.Toast(r.Error, true); return false; }
             Report(r, cast);
             board.Refresh();
@@ -625,7 +817,11 @@ namespace FamiconWars.Game
                     case UnitLostEvent l when l.Reason != "撃破":
                         lines.Add("部隊が" + l.Reason + "しました");
                         break;
+                    case GameOverEvent g when replaying:
+                        lines.Add((g.Winner == Army.None ? "引き分け" : Labels.Army(g.Winner) + "の勝ち") + "(" + g.Reason + ")");
+                        break;
                     case GameOverEvent g:
+                        SaveRecord(g.Winner, g.Reason);
                         mode = Mode.GameOver;
                         board.SetCursor(0, 0, false);
                         hud.HideActionMenu(); hud.HideProduce(); hud.Hint(null);
@@ -651,13 +847,14 @@ namespace FamiconWars.Game
             LeaveMatch();
             online = false;
             pendingLobby = null;
-            hud.ShowOnline(NetConfig.DefaultAddress, roomCode, FwClient.IsConnected ? "接続しています" : "", false);
+            hud.ShowOnline(NetConfig.DefaultAddress, roomCode, FwClient.IsConnected ? "接続しています" : "", false, NetConfig.PlayerName);
         }
 
         void OnlineGo(string address, string action, string code)
         {
             if (action == "join" && (string.IsNullOrEmpty(code) || code.Trim().Length != 4)) { hud.OnlineStatus("4桁の部屋番号を入れてください", true); return; }
             FwNetworkManager.Create(data);
+            if (!string.IsNullOrEmpty(hud.OnlinePlayerName)) NetConfig.PlayerName = hud.OnlinePlayerName;
             pendingLobby = action; pendingCode = code?.Trim();
             hud.SetOnlineBusy(true);
             hud.OnlineStatus("接続しています…", false);
@@ -688,7 +885,8 @@ namespace FamiconWars.Game
         void LeaveOnline()
         {
             if (FwClient.IsConnected && roomCode != null) FwClient.LeaveRoom();
-            online = false; awaiting = false; replica = null;
+            online = false; awaiting = false; replica = null; room = null;
+            incoming.Clear();
         }
 
         void OnNetConnected() => SendPending();
@@ -707,6 +905,11 @@ namespace FamiconWars.Game
                 online = false; awaiting = false;
                 hud.ShowOnline(NetConfig.DefaultAddress, code, "サーバーとの接続が切れました。「部屋に入る」で続きから再開できます", true);
             }
+            else if (hud.RoomVisible)
+            {
+                room = null;
+                hud.ShowOnline(NetConfig.DefaultAddress, roomCode, "サーバーとの接続が切れました。「部屋に入る」で入り直せます", true);
+            }
             else if (hud.OnlineLobbyVisible)
             {
                 hud.ShowOnline(null, null, pendingLobby != null ? "サーバーに接続できませんでした" : "切断されました", true);
@@ -716,20 +919,66 @@ namespace FamiconWars.Game
 
         void OnNetStatus(RoomStatusMsg m)
         {
+            room = m;
             roomCode = m.code;
-            myArmy = m.myArmy;
+            if (replaying) return;               // reviewing a match: the room screen comes back on exit
+            myArmy = m.mySeat;
             if (!m.started)
             {
-                hud.ShowOnlineWaiting(m.code, "相手を待っています。この番号を相手に伝えてください");
+                // before the match, or the host reopened the room after one: the room screen
+                if (online && InMatch) { LeaveMatch(); online = false; replica = null; incoming.Clear(); }
+                hud.ShowRoom(ToView(m), Preview);
                 return;
             }
-            if (online && InMatch && !state.GameOver)
-                hud.Hint(m.opponentPresent ? null : "相手の接続が切れました。戻ってくるのを待っています");
+            if (online && InMatch)
+            {
+                if (!state.GameOver && myArmy >= 0)
+                    hud.Hint(m.seatOnline != null && !m.seatOnline[1 - myArmy] ? "相手の接続が切れました。戻ってくるのを待っています" : null);
+                RefreshHud();
+            }
+            else if (hud.RoomVisible) hud.ShowRoom(ToView(m), Preview);
+        }
+
+        RoomView ToView(RoomStatusMsg m)
+        {
+            var v = new RoomView { Code = m.code, MapId = m.mapId, Started = m.started, GameOver = m.gameOver, IAmHost = m.myId == m.hostId, MySeat = m.mySeat };
+            for (int s = 0; s < 2; s++)
+            {
+                v.SeatKinds[s] = m.seatKinds != null ? (SeatKind)m.seatKinds[s] : SeatKind.Empty;
+                v.SeatNames[s] = m.seatNames != null ? m.seatNames[s] : "";
+                v.SeatLevels[s] = m.seatLevels != null ? m.seatLevels[s] : 0;
+                v.SeatOnline[s] = m.seatOnline != null && m.seatOnline[s];
+            }
+            for (int i = 0; m.memberIds != null && i < m.memberIds.Length; i++)
+                v.Members.Add((m.memberIds[i], m.memberNames[i], m.memberSeats[i], m.memberOnline[i], m.memberIds[i] == m.hostId, m.memberIds[i] == m.myId));
+            return v;
+        }
+
+        /// <summary>Host only: the previous / next playable map.</summary>
+        void StepRoomMap(int dir)
+        {
+            if (!room.HasValue) return;
+            var ready = new List<MapEntry>();
+            foreach (var e in MapCatalog.All) if (e.Ready) ready.Add(e);
+            int i = ready.FindIndex(e => e.Id == room.Value.mapId);
+            if (ready.Count == 0) return;
+            i = ((i < 0 ? 0 : i) + dir + ready.Count) % ready.Count;
+            FwClient.RoomAction("map", 0, ready[i].Id);
+        }
+
+        /// <summary>From the game-over panel of an online match back to the room screen.</summary>
+        void BackToRoom()
+        {
+            LeaveMatch();
+            online = false; awaiting = false; replica = null; incoming.Clear();
+            if (room.HasValue) hud.ShowRoom(ToView(room.Value), Preview);
+            else ShowOnlineLobby();
         }
 
         void OnNetLobbyError(string e)
         {
-            if (online && InMatch) hud.Toast(e, true);
+            if (hud.RoomVisible) hud.RoomError(e);
+            else if (online && InMatch) hud.Toast(e, true);
             else { hud.ShowOnline(null, null, e, true); }
         }
 
@@ -747,34 +996,223 @@ namespace FamiconWars.Game
         {
             LeaveMatch();
             online = true; awaiting = false;
+            incoming.Clear();
             myArmy = m.myArmy;
             ai[0] = ai[1] = null;
-            onlineBot = onlineBotLevel > 0 ? new AiPlayer((Army)myArmy, AiProfile.ForLevel(onlineBotLevel), (uint)System.Environment.TickCount) : null;
+            onlineBot = onlineBotLevel > 0 && myArmy >= 0 ? new AiPlayer((Army)myArmy, AiProfile.ForLevel(onlineBotLevel), (uint)System.Environment.TickCount) : null;
             var map = MapDef.Parse(Text("Maps/" + m.mapId), data);
             replica = new OnlineReplica();
             replica.Rebuild(data, map, m.cmds ?? new string[0], m.seeds ?? new uint[0]);
             state = replica.State;
+            recMapId = m.mapId; recSaved = false;
             BuildBoard();
             hud.ShowMatchChrome(true);
             mode = state.GameOver ? Mode.GameOver : Mode.Idle;
+            if (state.GameOver) SaveRecord(state.Winner, "対戦は終了しています");
             hud.PhaseBanner(state.Active, state.Day, Income(state.Active), ControllerName(state.Active));
-            hud.Toast("あなたは" + Labels.Army((Army)myArmy) + "です" + (replica.Applied > 0 ? "(続きから再開)" : ""));
+            hud.Toast(myArmy < 0 ? "観戦しています" : "あなたは" + Labels.Army((Army)myArmy) + "です" + (replica.Applied > 0 ? "(続きから再開)" : ""));
+            if (myArmy < 0) hud.Hint("観戦中");
             RefreshHud();
             if (state.GameOver) hud.ShowGameOver(state.Winner, "対戦は終了しています");
         }
 
-        /// <summary>One accepted command from the server (ours or the opponent's).</summary>
+        /// <summary>One accepted command from the server (ours, the opponent's or a BOT's): queued for display.</summary>
         void ApplyRemote(AppliedMsg m)
         {
             if (!online || replica == null) return;
+            incoming.Enqueue(m);
+        }
+
+        void ApplyIncoming(AppliedMsg m)
+        {
+            if (!online || replica == null) return;
             var cmd = CommandCodec.Decode(m.cmd);
+            if (cmd != null && (int)cmd.Army != myArmy) FocusOn(cmd);
             var cast = cmd != null ? BattleCast(cmd) : null;
             var r = replica.Step(m.index, m.cmd, m.seed, m.hash);
-            if (r == null) { FwClient.RequestResync(); return; }
+            if (r == null) { incoming.Clear(); FwClient.RequestResync(); return; }
             if (cmd != null && (int)cmd.Army == myArmy) awaiting = false;
             Report(r, cast);
             board.Refresh();
             RefreshHud();
+        }
+
+        // ---------------- match records and review (感想戦) ----------------
+
+        /// <summary>Offline: every command is played with a fresh seed that is recorded with it.</summary>
+        ApplyResult ApplyRecorded(Command c)
+        {
+            uint sd = recSeedRng.Next() | 1u;
+            state.Rng = new Rng(sd);
+            var r = RulesEngine.Apply(state, c);
+            if (r.Ok) { recCmds.Add(CommandCodec.Encode(c)); recSeeds.Add(sd); }
+            return r;
+        }
+
+        string RecordName(Army a)
+        {
+            if (online) return room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : Labels.Army(a);
+            return ai[(int)a] == null ? "人間" : "COM " + ai[(int)a].Profile.Name;
+        }
+
+        void SaveRecord(Army winner, string reason)
+        {
+            if (recSaved || replaying) return;
+            List<string> cmds = online && replica != null ? replica.Cmds : recCmds;
+            List<uint> seeds = online && replica != null ? replica.Seeds : recSeeds;
+            if (cmds.Count == 0 || string.IsNullOrEmpty(recMapId)) return;
+            var rec = new MatchRecord
+            {
+                mapId = recMapId, date = System.DateTime.Now.ToString("yyyy/MM/dd HH:mm"),
+                red = RecordName(Army.Red), blue = RecordName(Army.Blue), online = online,
+                result = (winner == Army.None ? "引き分け" : Labels.Army(winner) + "の勝ち") + "(" + reason + ")",
+                cmds = cmds.ToArray(), seeds = seeds.Select(x => unchecked((int)x)).ToArray()
+            };
+            MatchRecords.Add(rec);
+            lastRecord = rec;
+            recSaved = true;
+        }
+
+        void ShowRecordsScreen()
+        {
+            LeaveMatch();
+            var items = new List<(string, string)>();
+            foreach (var r in MatchRecords.Load())
+            {
+                var e = MapCatalog.Find(r.mapId);
+                items.Add((r.date + "　" + (e != null ? e.Name : r.mapId) + "　" + r.red + " 対 " + r.blue,
+                           r.result + "　" + r.cmds.Length + "手" + (r.online ? "　オンライン" : "")));
+            }
+            hud.ShowRecords(items);
+        }
+
+        void StartReplay(MatchRecord rec, string from)
+        {
+            if (MapCatalog.Find(rec.mapId) == null) { hud.Toast("このマップはもうありません", true); return; }
+            LeaveMatch();
+            replaying = true; replayAuto = false; replayRec = rec; replayFrom = from;
+            hud.ShowMatchChrome(true);
+            hud.ShowReplayBar(true);
+            ReplayGoto(0);
+            mode = Mode.GameOver;                 // nothing on the board can be ordered
+            hud.Hint(null);
+        }
+
+        /// <summary>Shows the position after the first n commands (rebuilt from the start, no animation).</summary>
+        void ReplayGoto(int n)
+        {
+            n = Mathf.Clamp(n, 0, replayRec.cmds.Length);
+            var map = MapDef.Parse(Text("Maps/" + replayRec.mapId), data);
+            state = GameState.Create(data, map, 1);
+            RulesEngine.StartGame(state);
+            for (int i = 0; i < n; i++)
+            {
+                var c = CommandCodec.Decode(replayRec.cmds[i]);
+                if (c == null) break;
+                state.Rng = new Rng(replayRec.Seed(i));
+                RulesEngine.Apply(state, c);
+            }
+            replayIndex = n;
+            hud.SkipBattle();
+            BuildBoard();
+            RefreshHud();
+            ReplayInfo(n > 0 ? "" : replayRec.red + " 対 " + replayRec.blue + "　" + replayRec.result);
+        }
+
+        /// <summary>Plays the next command (with its battle scene when animate).</summary>
+        void ReplayForward(bool animate)
+        {
+            if (replayIndex >= replayRec.cmds.Length) return;
+            var c = CommandCodec.Decode(replayRec.cmds[replayIndex]);
+            if (c == null) { replayIndex = replayRec.cmds.Length; return; }
+            string what = Describe(c);
+            if (animate) FocusOn(c);
+            var cast = animate ? BattleCast(c) : null;
+            state.Rng = new Rng(replayRec.Seed(replayIndex));
+            var r = RulesEngine.Apply(state, c);
+            replayIndex++;
+            if (animate && r.Ok) Report(r, cast);
+            if (animate) { board.Refresh(); RefreshHud(); ReplayInfo(what); }
+        }
+
+        /// <summary>Jumps to the start of the next / previous phase.</summary>
+        void ReplayPhase(int dir)
+        {
+            var cmds = replayRec.cmds;
+            if (dir > 0)
+            {
+                while (replayIndex < cmds.Length)
+                {
+                    bool end = cmds[replayIndex].StartsWith("E,");
+                    ReplayForward(false);
+                    if (end) break;
+                }
+                hud.SkipBattle();
+                board.Refresh(); RefreshHud();
+                ReplayInfo("");
+                return;
+            }
+            // the phase we are in starts after the last end-of-phase before us; if we are at its start, go one further back
+            int start = LastPhaseStart(replayIndex);
+            if (start == replayIndex) start = LastPhaseStart(Mathf.Max(0, replayIndex - 1));
+            ReplayGoto(start);
+        }
+
+        int LastPhaseStart(int index)
+        {
+            for (int j = index - 1; j >= 0; j--) if (replayRec.cmds[j].StartsWith("E,")) return j + 1;
+            return 0;
+        }
+
+        void ReplayInfo(string move)
+        {
+            if (!replaying) return;
+            string head = replayIndex + " / " + replayRec.cmds.Length + " 手　" + state.Day + "日目　" + Labels.Army(state.Active) + "の手番";
+            if (move != null) replayMoveText = move;
+            hud.SetReplayInfo(head, replayMoveText, replayAuto);
+        }
+        string replayMoveText = "";
+
+        /// <summary>One line for a command, read against the position before it is played.</summary>
+        string Describe(Command c)
+        {
+            string side = Labels.Army(c.Army) + ": ";
+            switch (c)
+            {
+                case UnitCommand u:
+                {
+                    var unit = state.UnitById(u.UnitId);
+                    string name = unit != null ? Labels.Get(state.Def(unit).NameKey) : "部隊";
+                    string act;
+                    switch (u.Action)
+                    {
+                        case UnitAction.Attack:
+                            var t = state.UnitById(u.TargetId);
+                            act = "攻撃" + (t != null ? "(" + Labels.Get(state.Def(t).NameKey) + ")" : ""); break;
+                        case UnitAction.Capture: act = "占領"; break;
+                        case UnitAction.Load: act = "搭載"; break;
+                        case UnitAction.Join: act = "合流"; break;
+                        case UnitAction.Unload: act = "降車"; break;
+                        case UnitAction.Supply: act = "補給"; break;
+                        default: act = unit != null && (unit.X != u.ToX || unit.Y != u.ToY) ? "移動" : "待機"; break;
+                    }
+                    return side + name + " " + act;
+                }
+                case ProduceCommand p: return side + Labels.Get(data.Unit(p.UnitType).NameKey) + "を生産";
+                case EndPhaseCommand _: return side + "手番終了";
+                case ResupplyAllCommand _: return side + "全補";
+                case SurrenderCommand _: return side + "降伏";
+            }
+            return side;
+        }
+
+        void ExitReplay()
+        {
+            string from = replayFrom;
+            LeaveMatch();
+            if (from == "records") ShowRecordsScreen();
+            else if (room.HasValue && FwClient.IsConnected && roomCode != null) { online = false; hud.ShowRoom(ToView(room.Value), Preview); }
+            else ShowTitle();
         }
 
         void OnDestroy()

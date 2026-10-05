@@ -33,6 +33,8 @@ namespace FamiconWars.Game
             BuildSetupScreen();
             AddTitleButtonToGameOver();
             BuildOnline();
+            BuildReplay();
+            BuildCameraWidget();
         }
 
         public void HideMenus()
@@ -41,6 +43,8 @@ namespace FamiconWars.Game
             mapRoot.gameObject.SetActive(false);
             setupRoot.gameObject.SetActive(false);
             HideOnline();
+            if (recordsRoot != null) recordsRoot.gameObject.SetActive(false);
+            if (replayBar != null) replayBar.gameObject.SetActive(false);
         }
 
         void ShowOnly(RectTransform root, Button focus)

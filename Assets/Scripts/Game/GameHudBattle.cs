@@ -41,6 +41,9 @@ namespace FamiconWars.Game
             public int Before, After;
             public bool Left, Air;
             public Sil Sil;
+            public string DefId;
+            public Army ArmyKind;
+            public bool Icons;            // figures are the map's pixel-art icons (else box silhouettes)
             public Vector2 SceneCenter;
             public float W = SceneW;
         }
@@ -194,6 +197,22 @@ namespace FamiconWars.Game
             var root = new GameObject("Fig" + slot, typeof(RectTransform));
             var rt = (RectTransform)root.transform; rt.SetParent(s.Units, false);
             rt.sizeDelta = new Vector2(80, 60);
+            // same pixel-art icon as on the map, so a unit looks the same in battle
+            var icon = UnitIcons.Get(s.DefId, s.ArmyKind);
+            s.Icons = icon != null;
+            if (icon != null)
+            {
+                var img = Panel("Icon", rt, Color.white).GetComponent<Image>();
+                var irt = img.rectTransform;
+                irt.anchorMin = irt.anchorMax = irt.pivot = new Vector2(0.5f, 0.5f);
+                irt.sizeDelta = new Vector2(64, 64); irt.anchoredPosition = new Vector2(0, 4);
+                img.sprite = icon; img.preserveAspect = true; img.raycastTarget = false;
+                s.Figures[slot] = rt;
+                s.FigureParts[slot] = new Graphic[] { img };
+                s.FigureColors[slot] = new[] { Color.white };
+                rt.localScale = new Vector3(s.Left ? FigureScale : -FigureScale, FigureScale, 1);
+                return;
+            }
             var dark = Color.Lerp(army, Color.black, 0.45f);
             var metal = Hex("#2A2E2A");
             var parts = new List<(Graphic g, Color c)>();
@@ -395,6 +414,7 @@ namespace FamiconWars.Game
         {
             s.Before = Mathf.Clamp(before, 0, 10); s.After = Mathf.Clamp(after, 0, s.Before);
             s.Sil = SilFor(def);
+            s.DefId = def.Id; s.ArmyKind = army;
             s.Air = def.Domain == Domain.Air;
             s.Tab.color = ArmyColor(army);
             s.Name.text = name;
@@ -469,7 +489,8 @@ namespace FamiconWars.Game
                             off.x += Mathf.Sin((t - sh.Hit) * 90) * 3;
                     fig.anchoredPosition = basePos + off;
                     var parts = s.FigureParts[i]; var cols = s.FigureColors[i];
-                    for (int p = 0; p < parts.Length; p++) parts[p].color = flash ? Color.white : cols[p];
+                    for (int p = 0; p < parts.Length; p++)
+                        parts[p].color = !flash ? cols[p] : !s.Icons ? Color.white : Mathf.Repeat(t * 16f, 1f) < 0.5f ? new Color(1f, 1f, 1f, 0.25f) : Color.white;
                 }
                 s.Count.text = "<size=55%>×</size>" + Mathf.Max(0, shown);
                 s.Count.color = shown <= 0 ? Danger : shown < s.Before ? Hex("#FFD27A") : Paper;
