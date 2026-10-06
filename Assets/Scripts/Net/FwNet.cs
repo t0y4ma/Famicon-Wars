@@ -73,10 +73,28 @@ namespace FamiconWars.Net
             return Uri.TryCreate(address, UriKind.Absolute, out var u) ? u : null;
         }
 
+        /// <summary>
+        /// Debug mode (Ctrl+Shift+F8 outside a room): this window gets a throw-away identity that is
+        /// never saved, so several tabs / windows on one PC join a room as different people.
+        /// </summary>
+        public static bool DebugMode { get; private set; }
+        static string debugToken, debugName;
+
+        public static void SetDebugMode(bool on)
+        {
+            DebugMode = on;
+            if (on)
+            {
+                debugToken = Guid.NewGuid().ToString("N");
+                debugName = "dbg-" + debugToken.Substring(0, 4);
+            }
+        }
+
         public static string ClientToken
         {
             get
             {
+                if (DebugMode) return debugToken;
                 string t = "";
                 try { t = PlayerPrefs.GetString(TokenKey, ""); } catch (Exception) { }
                 if (string.IsNullOrEmpty(t))
@@ -91,8 +109,8 @@ namespace FamiconWars.Net
         /// <summary>The name shown in rooms (remembered in this browser).</summary>
         public static string PlayerName
         {
-            get { try { return PlayerPrefs.GetString(NameKey, ""); } catch (Exception) { return ""; } }
-            set { try { PlayerPrefs.SetString(NameKey, value ?? ""); PlayerPrefs.Save(); } catch (Exception) { } }
+            get { if (DebugMode) return debugName; try { return PlayerPrefs.GetString(NameKey, ""); } catch (Exception) { return ""; } }
+            set { if (DebugMode) { debugName = value ?? ""; return; } try { PlayerPrefs.SetString(NameKey, value ?? ""); PlayerPrefs.Save(); } catch (Exception) { } }
         }
 
         public static bool IsDedicatedServer

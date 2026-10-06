@@ -527,7 +527,63 @@ namespace FamiconWars.Game
             var img = rt.GetComponent<Image>(); img.raycastTarget = true; img.color = Color.white;
             var b = rt.gameObject.AddComponent<Button>();
             b.targetGraphic = img;
+            b.colors = ButtonColors(b.colors, primary);
+            var baseC = primary ? Brass : PlateRaised;
+            img.canvasRenderer.SetColor(baseC);   // start at the final colour: no white flash on creation
+            b.onClick.AddListener(() => onClick());
+            // focus bar on the left edge: selected state must read from a distance
+            var focus = Panel("Focus", rt, Brass); focus.GetComponent<Image>().raycastTarget = false;
+            focus.GetComponent<Image>().enabled = false;   // shown by FocusMarker only while selected (no one-frame flash)
+            Pin(focus, new Vector2(0, 0), new Vector2(0, 1), Vector2.zero, new Vector2(6, 0), pivot: new Vector2(0, 0.5f), stretchY: true);
+            focus.gameObject.AddComponent<FocusMarker>().Target = b;
+            var label = Label("Text", rt, SizeBody, primary ? Plate : Paper, TextAlignmentOptions.Center, true);
+            label.text = text;
+            Fill(label.rectTransform, 12, 0, 12, 0);
+            return b;
+        }
+
+        /// <summary>
+        /// After a screen is rebuilt: puts every button straight into the colour of its real state
+        /// (disabled / selected / under the pointer / normal) and the focus bars in place, so freshly
+        /// built buttons do not fade in from their normal colour (that fade read as a flicker).
+        /// </summary>
+        static void SettleButtons(RectTransform root)
+        {
+            var sel = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+            var mouse = UnityEngine.InputSystem.Mouse.current;
+            var buttons = root.GetComponentsInChildren<Button>(false);
+            // the button the pointer is on: the last one in drawing order whose rectangle holds it
+            Button hover = null;
+            if (mouse != null)
+            {
+                Vector2 mp = mouse.position.ReadValue();
+                foreach (var b in buttons)
+                    if (RectTransformUtility.RectangleContainsScreenPoint((RectTransform)b.transform, mp, null)) hover = b;
+            }
+            foreach (var b in buttons)
+            {
+                if (b.targetGraphic == null || b.transition != Selectable.Transition.ColorTint) continue;
+                var cb = b.colors;
+                Color c = !b.interactable ? cb.disabledColor
+                    : sel == b.gameObject ? cb.selectedColor
+                    : b == hover ? cb.highlightedColor
+                    : cb.normalColor;
+                b.targetGraphic.CrossFadeColor(c * cb.colorMultiplier, 0f, true, true);
+            }
+            foreach (var f in root.GetComponentsInChildren<FocusMarker>(false)) f.Apply();
+        }
+
+        /// <summary>Selects a freshly built button without the fade from its normal colour.</summary>
+        static void SelectInstant(Button b)
+        {
+            if (b == null || EventSystem.current == null) return;
             var cb = b.colors;
+            if (b.targetGraphic != null) b.targetGraphic.CrossFadeColor(cb.selectedColor * cb.colorMultiplier, 0f, true, true);
+            EventSystem.current.SetSelectedGameObject(b.gameObject);
+        }
+
+        static ColorBlock ButtonColors(ColorBlock cb, bool primary)
+        {
             var baseC = primary ? Brass : PlateRaised;
             cb.normalColor = baseC;
             cb.highlightedColor = primary ? Hex("#F0BE58") : Hex("#3E4B3A");
@@ -535,17 +591,16 @@ namespace FamiconWars.Game
             cb.pressedColor = primary ? Hex("#B9862A") : Hex("#263022");
             cb.disabledColor = new Color(baseC.r, baseC.g, baseC.b, 0.35f);
             cb.colorMultiplier = 1; cb.fadeDuration = 0.06f;
-            b.colors = cb;
-            img.canvasRenderer.SetColor(baseC);   // start at the final colour: no white flash on creation
-            b.onClick.AddListener(() => onClick());
-            // focus bar on the left edge: selected state must read from a distance
-            var focus = Panel("Focus", rt, Brass); focus.GetComponent<Image>().raycastTarget = false;
-            Pin(focus, new Vector2(0, 0), new Vector2(0, 1), Vector2.zero, new Vector2(6, 0), pivot: new Vector2(0, 0.5f), stretchY: true);
-            focus.gameObject.AddComponent<FocusMarker>().Target = b;
-            var label = Label("Text", rt, SizeBody, primary ? Plate : Paper, TextAlignmentOptions.Center, true);
-            label.text = text;
-            Fill(label.rectTransform, 12, 0, 12, 0);
-            return b;
+            return cb;
+        }
+
+        /// <summary>Switches an existing button between the primary (brass) and plain look.</summary>
+        static void StyleButton(Button b, bool primary)
+        {
+            var cb = ButtonColors(b.colors, primary);
+            if (b.colors.normalColor != cb.normalColor) b.colors = cb;
+            var t = b.transform.Find("Text");
+            if (t != null) t.GetComponent<TextMeshProUGUI>().color = primary ? Plate : Paper;
         }
 
         static void ClearChildren(RectTransform rt)
@@ -587,8 +642,12 @@ namespace FamiconWars.Game
         TMPro.TextMeshProUGUI label; Color labelOn; bool wasOn = true;
         Image img;
         void Awake() { img = GetComponent<Image>(); }
-        void LateUpdate()
+        void LateUpdate() => Apply();
+
+        /// <summary>Shows the bar and dims the caption to match the button right now.</summary>
+        public void Apply()
         {
+            if (img == null) img = GetComponent<Image>();
             if (img == null || Target == null) return;
             var sel = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
             img.enabled = sel == Target.gameObject && Target.interactable;

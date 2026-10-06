@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using FamiconWars.Core;
 using TMPro;
@@ -42,7 +42,6 @@ namespace FamiconWars.Game
         Func<string, Texture2D> roomPreview;
         RoomView lastRoomView;
         int botMenuSeat = -1;                       // seat whose BOT strength list is open (-1 = none)
-        readonly Vector2[] botButtonPos = new Vector2[2];
 
         void BuildOnline()
         {
@@ -98,12 +97,13 @@ namespace FamiconWars.Game
             var back = MakeButton("Back", onlineRoot, "戻る", false, () => OnOnlineBack?.Invoke());
             Pin((RectTransform)back.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(96, 56), new Vector2(200, 64), pivot: new Vector2(0, 0));
 
-            // ---- room screen (its own full-screen page; rebuilt on every status) ----
+            // ---- room screen (its own full-screen page; built once, updated on every status) ----
             roomRoot = Panel("Room", canvasRt, Backdrop);
             Fill(roomRoot, 0, 0, 0, 0);
             roomBody = new GameObject("Body", typeof(RectTransform)).GetComponent<RectTransform>();
             roomBody.SetParent(roomRoot, false);
             Fill(roomBody, 0, 0, 0, 0);
+            BuildRoomPage();
             roomStatus = Label("Status", roomRoot, SizeBody, Danger, TextAlignmentOptions.Center, false);
             Pin(roomStatus.rectTransform, new Vector2(0, 0), new Vector2(1, 0), new Vector2(0, 132), new Vector2(0, 36), pivot: new Vector2(0.5f, 0), stretchX: true);
 
@@ -160,6 +160,9 @@ namespace FamiconWars.Game
             SetOnlineBusy(false);
         }
 
+        /// <summary>Replaces the name in the lobby form (debug mode switches to a throw-away name).</summary>
+        public void SetOnlineName(string name) { if (nameInput != null) nameInput.text = name ?? ""; }
+
         /// <summary>The name typed in the lobby form.</summary>
         public string OnlinePlayerName => nameInput != null ? nameInput.text.Trim() : "";
 
@@ -183,142 +186,108 @@ namespace FamiconWars.Game
 
         static readonly string[] BotLabels = { "なし", "弱い", "普通", "強い", "最強" };
 
-        /// <summary>Shows (or refreshes) the room screen.</summary>
-        public void ShowRoom(RoomView v, Func<string, Texture2D> preview)
+        // ---- room page parts: built once, then only updated (no rebuilding, so nothing flickers) ----
+        TextMeshProUGUI roomCodeLabel, roomInvite, roomMapName, roomMapNote, roomMembersTitle, roomHint;
+        RawImage roomMapPreview;
+        Button roomMapPrev, roomMapNext, roomLeave, roomStand, roomStart;
+        RectTransform botBlocker, botStrip;
+        readonly Button[] botLevelButtons = new Button[5];
+        bool roomStartReady;
+        sealed class SeatParts
         {
-            roomPreview = preview;
-            lastRoomView = v;
-            if (botMenuSeat >= 0 && (!v.IAmHost || v.Started || v.SeatKinds[botMenuSeat] == SeatKind.Human)) botMenuSeat = -1;
-            onlineRoot.gameObject.SetActive(false);
-            ShowOnly(roomRoot, null);
-            roomRoot.SetAsLastSibling();
-            ClearChildren(roomBody);
-            roomStatus.text = "";
+            public Image Icon; public TextMeshProUGUI Who, State; public Button Sit, Bot;
+            public Vector2 CardPos;
+        }
+        readonly SeatParts[] seatParts = new SeatParts[2];
+        const int MemberRows = 7;
+        readonly TextMeshProUGUI[] memberRowLabels = new TextMeshProUGUI[MemberRows];
+        readonly Button[] memberRowHost = new Button[MemberRows];
+        readonly int[] memberRowIds = new int[MemberRows];
 
-            // ---- header: room number and how to invite ----
+        void BuildRoomPage()
+        {
+            // header: room number and how to invite
             var title = Label("Heading", roomBody, SizeTitle, Paper, TextAlignmentOptions.MidlineLeft, true);
             title.text = "部屋";
             Pin(title.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(96, -40), new Vector2(120, 60), pivot: new Vector2(0, 1));
-            var code = Label("Code", roomBody, 64, Brass, TextAlignmentOptions.MidlineLeft, true);
-            code.text = v.Code; code.characterSpacing = 12; code.overflowMode = TextOverflowModes.Overflow;
-            Pin(code.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(210, -28), new Vector2(320, 84), pivot: new Vector2(0, 1));
-            var invite = Label("Invite", roomBody, SizeBody, Muted, TextAlignmentOptions.MidlineLeft, false);
-            invite.text = v.Started ? (v.GameOver ? "対戦は終わりました" : "対戦中です。この番号で入ると観戦できます") : "この番号を伝えると、相手や観戦者が入れます";
-            Pin(invite.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(520, -48), new Vector2(900, 44), pivot: new Vector2(0, 1));
+            roomCodeLabel = Label("Code", roomBody, 64, Brass, TextAlignmentOptions.MidlineLeft, true);
+            roomCodeLabel.characterSpacing = 12; roomCodeLabel.overflowMode = TextOverflowModes.Overflow;
+            Pin(roomCodeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(210, -28), new Vector2(320, 84), pivot: new Vector2(0, 1));
+            roomInvite = Label("Invite", roomBody, SizeBody, Muted, TextAlignmentOptions.MidlineLeft, false);
+            Pin(roomInvite.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(520, -48), new Vector2(900, 44), pivot: new Vector2(0, 1));
 
-            // ---- map ----
+            // map
             var mapPlate = Panel("Map", roomBody, Plate);
             Pin(mapPlate, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-96, -150), new Vector2(560, 300), pivot: new Vector2(1, 1));
             Edge(mapPlate, PlateEdge);
-            var entry = MapCatalog.Find(v.MapId);
             var mapLabel = Label("Label", mapPlate, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
             mapLabel.text = "マップ";
             Pin(mapLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -18), new Vector2(200, 28), pivot: new Vector2(0, 1));
-            var mapName = Label("Name", mapPlate, SizeTitle - 6, Paper, TextAlignmentOptions.TopLeft, true);
-            mapName.text = entry != null ? entry.Name : v.MapId;
-            Pin(mapName.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(24, -46), new Vector2(-48, 44), pivot: new Vector2(0.5f, 1), stretchX: true);
-            var tex = preview?.Invoke(v.MapId);
-            if (tex != null)
-            {
-                var ri = new GameObject("Preview", typeof(RectTransform), typeof(RawImage)).GetComponent<RawImage>();
-                ri.transform.SetParent(mapPlate, false);
-                ri.texture = tex; ri.raycastTarget = false;
-                float aspect = (float)tex.width / tex.height;
-                var size = aspect >= 300f / 180f ? new Vector2(300, 300 / aspect) : new Vector2(180 * aspect, 180);
-                Pin(ri.rectTransform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(24, 24), size, pivot: new Vector2(0, 0));
-            }
-            var mapNote = Label("Note", mapPlate, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
-            mapNote.textWrappingMode = TextWrappingModes.Normal;
-            mapNote.text = entry != null ? entry.Width + " × " + entry.Height + "\n" + entry.Note : "";
-            Pin(mapNote.rectTransform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(340, 24), new Vector2(196, 180), pivot: new Vector2(0, 0));
-            if (v.IAmHost && !v.Started)
-            {
-                var prev = MakeButton("Prev", mapPlate, "◀", false, () => OnRoomMap?.Invoke(-1));
-                Pin((RectTransform)prev.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-92, -14), new Vector2(60, 46), pivot: new Vector2(1, 1));
-                var next = MakeButton("Next", mapPlate, "▶", false, () => OnRoomMap?.Invoke(+1));
-                Pin((RectTransform)next.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -14), new Vector2(60, 46), pivot: new Vector2(1, 1));
-            }
+            roomMapName = Label("Name", mapPlate, SizeTitle - 6, Paper, TextAlignmentOptions.TopLeft, true);
+            Pin(roomMapName.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(24, -46), new Vector2(-48, 44), pivot: new Vector2(0.5f, 1), stretchX: true);
+            roomMapPreview = new GameObject("Preview", typeof(RectTransform), typeof(RawImage)).GetComponent<RawImage>();
+            roomMapPreview.transform.SetParent(mapPlate, false);
+            roomMapPreview.raycastTarget = false;
+            Pin(roomMapPreview.rectTransform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(24, 24), new Vector2(300, 180), pivot: new Vector2(0, 0));
+            roomMapNote = Label("Note", mapPlate, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
+            roomMapNote.textWrappingMode = TextWrappingModes.Normal;
+            Pin(roomMapNote.rectTransform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(340, 24), new Vector2(196, 180), pivot: new Vector2(0, 0));
+            roomMapPrev = MakeButton("Prev", mapPlate, "◀", false, () => OnRoomMap?.Invoke(-1));
+            Pin((RectTransform)roomMapPrev.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-92, -14), new Vector2(60, 46), pivot: new Vector2(1, 1));
+            roomMapNext = MakeButton("Next", mapPlate, "▶", false, () => OnRoomMap?.Invoke(+1));
+            Pin((RectTransform)roomMapNext.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -14), new Vector2(60, 46), pivot: new Vector2(1, 1));
 
-            // ---- seats ----
-            for (int s = 0; s < 2; s++) SeatCard(v, s, new Vector2(96 + s * 500, -150));
+            // seats
+            for (int s = 0; s < 2; s++) seatParts[s] = BuildSeatCard(s, new Vector2(96 + s * 500, -150));
 
-            // ---- members ----
+            // members
             var list = Panel("Members", roomBody, Plate);
             Pin(list, new Vector2(0, 1), new Vector2(0, 1), new Vector2(96, -480), new Vector2(980, 380), pivot: new Vector2(0, 1));
             Edge(list, PlateEdge);
-            var lt = Label("Title", list, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
-            lt.text = "部屋にいる人(" + v.Members.Count + ")   ★ = 部屋主";
-            Pin(lt.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(24, -16), new Vector2(-48, 28), pivot: new Vector2(0.5f, 1), stretchX: true);
-            float y = -52;
-            foreach (var m in v.Members)
+            roomMembersTitle = Label("Title", list, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
+            Pin(roomMembersTitle.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(24, -16), new Vector2(-48, 28), pivot: new Vector2(0.5f, 1), stretchX: true);
+            for (int k = 0; k < MemberRows; k++)
             {
-                if (y < -350) break;
-                var row = Label("Row", list, SizeBody, m.online ? Paper : Muted, TextAlignmentOptions.MidlineLeft, false);
-                string role = m.seat == 0 ? "<color=#FF8A7E>レッド軍</color>" : m.seat == 1 ? "<color=#8FB2FF>ブルー軍</color>" : "観戦";
-                row.text = (m.host ? "<color=#D8A23A>★</color> " : "　 ") + m.name + (m.me ? "<color=#A3AC92>(あなた)</color>" : "") + "　" + role + (m.online ? "" : "<color=#A3AC92>(接続待ち)</color>");
-                Pin(row.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, y), new Vector2(700, 40), pivot: new Vector2(0, 1));
-                if (v.IAmHost && !m.me && m.online)
-                {
-                    int id = m.id;
-                    var give = MakeButton("Host" + id, list, "部屋主にする", false, () => OnRoomHost?.Invoke(id));
-                    Pin((RectTransform)give.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, y), new Vector2(200, 40), pivot: new Vector2(1, 1));
-                }
-                y -= 46;
+                float y = -52 - 46 * k;
+                int row = k;
+                memberRowLabels[k] = Label("Row" + k, list, SizeBody, Paper, TextAlignmentOptions.MidlineLeft, false);
+                Pin(memberRowLabels[k].rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, y), new Vector2(700, 40), pivot: new Vector2(0, 1));
+                memberRowHost[k] = MakeButton("Host" + k, list, "部屋主にする", false, () => OnRoomHost?.Invoke(memberRowIds[row]));
+                Pin((RectTransform)memberRowHost[k].transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, y), new Vector2(200, 40), pivot: new Vector2(1, 1));
             }
 
-            // ---- footer ----
-            var leave = MakeButton("Leave", roomBody, "部屋を出る", false, () => OnRoomLeave?.Invoke());
-            Pin((RectTransform)leave.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(96, 56), new Vector2(240, 64), pivot: new Vector2(0, 0));
-            if (!v.Started && v.MySeat >= 0)
-            {
-                var stand = MakeButton("Stand", roomBody, "観戦に回る", false, () => OnRoomStand?.Invoke());
-                Pin((RectTransform)stand.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(360, 56), new Vector2(240, 64), pivot: new Vector2(0, 0));
-            }
-            var hint = Label("Hint", roomBody, SizeBody, Muted, TextAlignmentOptions.MidlineRight, false);
-            bool ready = v.SeatKinds[0] != SeatKind.Empty && v.SeatKinds[1] != SeatKind.Empty;
-            if (v.IAmHost && !v.Started)
-            {
-                var start = MakeButton("Start", roomBody, "対戦開始", true, () => OnRoomStart?.Invoke());
-                start.interactable = ready;
-                Pin((RectTransform)start.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-96, 56), new Vector2(300, 64), pivot: new Vector2(1, 0));
-                hint.text = ready ? "" : "両方の席が埋まると開始できます(空席には BOT も置けます)";
-                if (ready) EventSystem.current?.SetSelectedGameObject(start.gameObject);
-            }
-            else if (v.Started && v.GameOver && v.IAmHost)
-            {
-                var again = MakeButton("Again", roomBody, "部屋に戻す", true, () => OnRoomStart?.Invoke());
-                Pin((RectTransform)again.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-96, 56), new Vector2(300, 64), pivot: new Vector2(1, 0));
-                hint.text = "席とマップを決め直して次の対戦ができます";
-            }
-            else hint.text = v.Started ? "" : "部屋主が対戦を始めるのを待っています";
-            Pin(hint.rectTransform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-420, 66), new Vector2(760, 44), pivot: new Vector2(1, 0));
+            // footer
+            roomLeave = MakeButton("Leave", roomBody, "部屋を出る", false, () => OnRoomLeave?.Invoke());
+            Pin((RectTransform)roomLeave.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(96, 56), new Vector2(240, 64), pivot: new Vector2(0, 0));
+            roomStand = MakeButton("Stand", roomBody, "観戦に回る", false, () => OnRoomStand?.Invoke());
+            Pin((RectTransform)roomStand.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(360, 56), new Vector2(240, 64), pivot: new Vector2(0, 0));
+            roomHint = Label("Hint", roomBody, SizeBody, Muted, TextAlignmentOptions.MidlineRight, false);
+            Pin(roomHint.rectTransform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-420, 66), new Vector2(760, 44), pivot: new Vector2(1, 0));
+            roomStart = MakeButton("Start", roomBody, "対戦開始", true, () => OnRoomStart?.Invoke());
+            Pin((RectTransform)roomStart.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-96, 56), new Vector2(300, 64), pivot: new Vector2(1, 0));
 
-            if (botMenuSeat >= 0) BotMenu(v, botMenuSeat);
-        }
-
-        /// <summary>The BOT strengths in a row under the seat's BOT button; a click elsewhere closes it.</summary>
-        void BotMenu(RoomView v, int s)
-        {
-            var blocker = MakeButton("BotMenuBlocker", roomBody, "", false, () => { botMenuSeat = -1; ShowRoom(lastRoomView, roomPreview); });
-            var bimg = blocker.GetComponent<Image>(); if (bimg != null) bimg.color = new Color(0, 0, 0, 0.25f);
-            Fill((RectTransform)blocker.transform, 0, 0, 0, 0);
-            int level = v.SeatKinds[s] == SeatKind.Bot ? v.SeatLevels[s] : 0;
+            // BOT strength list: a click outside closes it (last, so it is drawn over the page)
+            var blocker = MakeButton("BotMenuBlocker", roomBody, "", false, () => SetBotMenu(-1));
+            blocker.GetComponent<Image>().color = new Color(0, 0, 0, 0.25f);
+            botBlocker = (RectTransform)blocker.transform;
+            Fill(botBlocker, 0, 0, 0, 0);
             const float w = 112, gap = 8;
-            var strip = Panel("BotMenu", roomBody, PlateRaised);
-            Edge(strip, Brass);
-            Pin(strip, new Vector2(0, 1), new Vector2(0, 1), botButtonPos[s] + new Vector2(-8, -8), new Vector2(BotLabels.Length * (w + gap) + gap, 72), pivot: new Vector2(0, 1));
+            botStrip = Panel("BotMenu", roomBody, PlateRaised);
+            Edge(botStrip, Brass);
+            Pin(botStrip, new Vector2(0, 1), new Vector2(0, 1), Vector2.zero, new Vector2(BotLabels.Length * (w + gap) + gap, 72), pivot: new Vector2(0, 1));
             for (int i = 0; i < BotLabels.Length; i++)
             {
                 int lv = i;
-                var b = MakeButton("Lv" + i, strip, BotLabels[i], i == level, () => { botMenuSeat = -1; OnRoomBot?.Invoke(s, lv); });
-                Pin((RectTransform)b.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(gap + i * (w + gap), 0), new Vector2(w, 56), pivot: new Vector2(0, 0.5f));
-                if (i == level) EventSystem.current?.SetSelectedGameObject(b.gameObject);
+                botLevelButtons[i] = MakeButton("Lv" + i, botStrip, BotLabels[i], false, () => PickBot(botMenuSeat, lv));
+                Pin((RectTransform)botLevelButtons[i].transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(gap + i * (w + gap), 0), new Vector2(w, 56), pivot: new Vector2(0, 0.5f));
             }
+            botBlocker.gameObject.SetActive(false);
+            botStrip.gameObject.SetActive(false);
         }
 
-        void SeatCard(RoomView v, int s, Vector2 pos)
+        SeatParts BuildSeatCard(int s, Vector2 pos)
         {
-            var cardPos = pos;
+            var p = new SeatParts { CardPos = pos };
             var army = (Army)s;
             var card = Panel("Seat" + s, roomBody, PlateRaised);
             Pin(card, new Vector2(0, 1), new Vector2(0, 1), pos, new Vector2(480, 300), pivot: new Vector2(0, 1));
@@ -328,39 +297,166 @@ namespace FamiconWars.Game
             var head = Label("Army", card, SizeBody, ArmyTextColor(army), TextAlignmentOptions.TopLeft, true);
             head.text = Labels.Army(army) + (s == 0 ? "(先手)" : "(後手)");
             Pin(head.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(24, -24), new Vector2(-48, 34), pivot: new Vector2(0.5f, 1), stretchX: true);
+            p.Icon = Panel("Icon", card, Color.white).GetComponent<Image>();
+            p.Icon.raycastTarget = false; p.Icon.preserveAspect = true;
+            Pin(p.Icon.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(72, -118), new Vector2(96, 96), pivot: new Vector2(0.5f, 0.5f));
+            if (s == 1) p.Icon.rectTransform.localScale = new Vector3(-1, 1, 1);
+            p.Who = Label("Who", card, SizeTitle - 4, Paper, TextAlignmentOptions.MidlineLeft, true);
+            Pin(p.Who.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(136, -78), new Vector2(320, 48), pivot: new Vector2(0, 1));
+            p.State = Label("State", card, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
+            Pin(p.State.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(136, -128), new Vector2(320, 30), pivot: new Vector2(0, 1));
+            p.Sit = MakeButton("Sit", card, "ここに座る", true, () => OnRoomSit?.Invoke(s));
+            Pin((RectTransform)p.Sit.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(24, 24), new Vector2(200, 56), pivot: new Vector2(0, 0));
+            p.Bot = MakeButton("Bot", card, "BOT", false, () => SetBotMenu(botMenuSeat == s ? -1 : s));
+            Pin((RectTransform)p.Bot.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(240, 24), new Vector2(216, 56), pivot: new Vector2(0, 0));
+            return p;
+        }
 
-            var icon = Panel("Icon", card, Color.white).GetComponent<Image>();
-            icon.raycastTarget = false; icon.preserveAspect = true;
-            icon.sprite = UnitIcons.Get(v.SeatKinds[s] == SeatKind.Bot ? "TANK_A" : "INF", army);
-            if (icon.sprite == null || v.SeatKinds[s] == SeatKind.Empty) icon.color = new Color(1, 1, 1, v.SeatKinds[s] == SeatKind.Empty ? 0.18f : 1f);
-            Pin(icon.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(72, -118), new Vector2(96, 96), pivot: new Vector2(0.5f, 0.5f));
-            if (s == 1) icon.rectTransform.localScale = new Vector3(-1, 1, 1);
+        static void SetActive(Component c, bool on) { if (c.gameObject.activeSelf != on) c.gameObject.SetActive(on); }
 
-            var who = Label("Who", card, SizeTitle - 4, v.SeatKinds[s] == SeatKind.Empty ? Muted : Paper, TextAlignmentOptions.MidlineLeft, true);
-            who.text = v.SeatKinds[s] == SeatKind.Empty ? "空席" : v.SeatNames[s];
-            Pin(who.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(136, -78), new Vector2(320, 48), pivot: new Vector2(0, 1));
-            var state = Label("State", card, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
-            state.text = v.SeatKinds[s] == SeatKind.Bot ? "COM がサーバーで操作します"
-                : v.SeatKinds[s] == SeatKind.Human ? (v.MySeat == s ? "あなたの席です" : v.SeatOnline[s] ? "準備できています" : "接続が切れています")
-                : "誰でも座れます";
-            Pin(state.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(136, -128), new Vector2(320, 30), pivot: new Vector2(0, 1));
+        static void SetText(TextMeshProUGUI t, string text) { if (t.text != text) t.text = text; }
 
-            if (v.Started) return;
-            float bx = 24;
-            if (v.SeatKinds[s] == SeatKind.Empty && v.MySeat != s)
+        /// <summary>Shows (or refreshes) the room screen: only texts, visibility and positions change.</summary>
+        public void ShowRoom(RoomView v, Func<string, Texture2D> preview)
+        {
+            roomPreview = preview;
+            lastRoomView = v;
+            if (botMenuSeat >= 0 && (!v.IAmHost || v.Started || v.SeatKinds[botMenuSeat] == SeatKind.Human)) botMenuSeat = -1;
+            onlineRoot.gameObject.SetActive(false);
+            bool first = !RoomVisible;
+            if (first) ShowOnly(roomRoot, null);
+            roomRoot.SetAsLastSibling();
+            roomStatus.text = "";
+
+            SetText(roomCodeLabel, v.Code);
+            SetText(roomInvite, v.Started ? (v.GameOver ? "対戦は終わりました" : "対戦中です。この番号で入ると観戦できます") : "この番号を伝えると、相手や観戦者が入れます");
+
+            // map
+            var entry = MapCatalog.Find(v.MapId);
+            SetText(roomMapName, entry != null ? entry.Name : v.MapId);
+            var tex = preview?.Invoke(v.MapId);
+            SetActive(roomMapPreview, tex != null);
+            if (tex != null && roomMapPreview.texture != tex)
             {
-                var sit = MakeButton("Sit", card, "ここに座る", true, () => OnRoomSit?.Invoke(s));
-                Pin((RectTransform)sit.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(bx, 24), new Vector2(200, 56), pivot: new Vector2(0, 0));
-                bx += 216;
+                roomMapPreview.texture = tex;
+                float aspect = (float)tex.width / tex.height;
+                roomMapPreview.rectTransform.sizeDelta = aspect >= 300f / 180f ? new Vector2(300, 300 / aspect) : new Vector2(180 * aspect, 180);
             }
-            if (v.IAmHost && v.SeatKinds[s] != SeatKind.Human)
+            SetText(roomMapNote, entry != null ? entry.Width + " × " + entry.Height + "\n" + entry.Note : "");
+            SetActive(roomMapPrev, v.IAmHost && !v.Started);
+            SetActive(roomMapNext, v.IAmHost && !v.Started);
+
+            for (int s = 0; s < 2; s++) UpdateSeat(v, s);
+
+            // members
+            SetText(roomMembersTitle, "部屋にいる人(" + v.Members.Count + ")   ★ = 部屋主");
+            for (int k = 0; k < MemberRows; k++)
             {
-                int level = v.SeatKinds[s] == SeatKind.Bot ? v.SeatLevels[s] : 0;
-                var bot = MakeButton("Bot", card, "BOT: " + BotLabels[level] + "  ▼", false, () => { botMenuSeat = botMenuSeat == s ? -1 : s; ShowRoom(lastRoomView, roomPreview); });
-                // top-left of the button in the room page's coordinates (card is 480 x 300, pinned top-left at pos)
-                botButtonPos[s] = cardPos + new Vector2(bx, -300 + 24 + 56);
-                Pin((RectTransform)bot.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(bx, 24), new Vector2(216, 56), pivot: new Vector2(0, 0));
+                bool has = k < v.Members.Count;
+                SetActive(memberRowLabels[k], has);
+                SetActive(memberRowHost[k], has && v.IAmHost && !v.Members[k].me && v.Members[k].online);
+                if (!has) continue;
+                var m = v.Members[k];
+                memberRowIds[k] = m.id;
+                string role = m.seat == 0 ? "<color=#FF8A7E>レッド軍</color>" : m.seat == 1 ? "<color=#8FB2FF>ブルー軍</color>" : "観戦";
+                SetText(memberRowLabels[k], (m.host ? "<color=#D8A23A>★</color> " : "　 ") + m.name + (m.me ? "<color=#A3AC92>(あなた)</color>" : "") + "　" + role + (m.online ? "" : "<color=#A3AC92>(接続待ち)</color>"));
+                memberRowLabels[k].color = m.online ? Paper : Muted;
             }
+
+            // footer
+            SetActive(roomStand, !v.Started && v.MySeat >= 0);
+            bool ready = v.SeatKinds[0] != SeatKind.Empty && v.SeatKinds[1] != SeatKind.Empty;
+            bool canStart = v.IAmHost && !v.Started, canReset = v.Started && v.GameOver && v.IAmHost;
+            SetActive(roomStart, canStart || canReset);
+            if (canStart || canReset)
+            {
+                SetText(roomStart.GetComponentInChildren<TextMeshProUGUI>(), canStart ? "対戦開始" : "部屋に戻す");
+                bool on = canReset || ready;
+                if (roomStart.interactable != on) roomStart.interactable = on;
+                // focus the button when it becomes usable (not on every refresh: that would steal the focus)
+                if (on && (first || !roomStartReady)) SelectInstant(roomStart);
+                roomStartReady = on;
+            }
+            else roomStartReady = false;
+            SetText(roomHint, canStart ? (ready ? "" : "両方の席が埋まると開始できます(空席には BOT も置けます)")
+                : canReset ? "席とマップを決め直して次の対戦ができます"
+                : v.Started ? "" : "部屋主が対戦を始めるのを待っています");
+
+            UpdateBotMenu(v);
+            if (first) SettleButtons(roomBody);
+        }
+
+        void UpdateSeat(RoomView v, int s)
+        {
+            var p = seatParts[s];
+            var army = (Army)s;
+            var kind = v.SeatKinds[s];
+            p.Icon.sprite = UnitIcons.Get(kind == SeatKind.Bot ? "TANK_A" : "INF", army);
+            p.Icon.color = new Color(1, 1, 1, p.Icon.sprite == null || kind == SeatKind.Empty ? 0.18f : 1f);
+            SetText(p.Who, kind == SeatKind.Empty ? "空席" : v.SeatNames[s]);
+            p.Who.color = kind == SeatKind.Empty ? Muted : Paper;
+            SetText(p.State, kind == SeatKind.Bot ? "COM がサーバーで操作します"
+                : kind == SeatKind.Human ? (v.MySeat == s ? "あなたの席です" : v.SeatOnline[s] ? "準備できています" : "接続が切れています")
+                : "誰でも座れます");
+            bool sit = !v.Started && kind == SeatKind.Empty && v.MySeat != s;
+            bool bot = !v.Started && v.IAmHost && kind != SeatKind.Human;
+            SetActive(p.Sit, sit);
+            SetActive(p.Bot, bot);
+            if (bot)
+            {
+                float bx = sit ? 240 : 24;
+                var brt = (RectTransform)p.Bot.transform;
+                if (brt.anchoredPosition.x != bx) brt.anchoredPosition = new Vector2(bx, 24);
+                int level = kind == SeatKind.Bot ? v.SeatLevels[s] : 0;
+                SetText(p.Bot.GetComponentInChildren<TextMeshProUGUI>(), "BOT: " + BotLabels[level] + "  ▼");
+            }
+        }
+
+        /// <summary>Opens the BOT strength list under a seat's BOT button (-1 closes it).</summary>
+        void SetBotMenu(int seat)
+        {
+            botMenuSeat = seat;
+            if (lastRoomView != null) UpdateBotMenu(lastRoomView);
+        }
+
+        void UpdateBotMenu(RoomView v)
+        {
+            int s = botMenuSeat;
+            bool open = s >= 0;
+            if (open && (!v.IAmHost || v.Started || v.SeatKinds[s] == SeatKind.Human)) { botMenuSeat = -1; open = false; }
+            if (!open)
+            {
+                if (botStrip.gameObject.activeSelf && EventSystem.current != null && EventSystem.current.currentSelectedGameObject != null
+                    && EventSystem.current.currentSelectedGameObject.transform.IsChildOf(botStrip)) EventSystem.current.SetSelectedGameObject(null);
+                SetActive(botBlocker, false);
+                SetActive(botStrip, false);
+                return;
+            }
+            int level = v.SeatKinds[s] == SeatKind.Bot ? v.SeatLevels[s] : 0;
+            bool wasOpen = botStrip.gameObject.activeSelf;
+            for (int i = 0; i < botLevelButtons.Length; i++) StyleButton(botLevelButtons[i], i == level);
+            var bot = (RectTransform)seatParts[s].Bot.transform;
+            // top-left of the BOT button in page coordinates (card 480 x 300 pinned top-left at CardPos)
+            botStrip.anchoredPosition = seatParts[s].CardPos + new Vector2(bot.anchoredPosition.x, -300 + 24 + 56) + new Vector2(-8, -8);
+            SetActive(botBlocker, true);
+            SetActive(botStrip, true);
+            if (!wasOpen) SelectInstant(botLevelButtons[level]);
+            SettleButtons(botStrip);
+        }
+
+        /// <summary>Closes the list and shows the choice at once; the server's status confirms it.</summary>
+        void PickBot(int s, int level)
+        {
+            if (s < 0) return;
+            botMenuSeat = -1;
+            if (lastRoomView != null && lastRoomView.SeatKinds[s] != SeatKind.Human)
+            {
+                lastRoomView.SeatKinds[s] = level > 0 ? SeatKind.Bot : SeatKind.Empty;
+                lastRoomView.SeatLevels[s] = level;
+                if (level > 0) lastRoomView.SeatNames[s] = "BOT " + AiProfile.Names[Math.Min(level, AiProfile.Names.Length) - 1];
+                ShowRoom(lastRoomView, roomPreview);
+            }
+            OnRoomBot?.Invoke(s, level);
         }
     }
 }

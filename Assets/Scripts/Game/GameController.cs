@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using FamiconWars.Core;
@@ -420,6 +420,9 @@ namespace FamiconWars.Game
 
         void Update()
         {
+            var dk = Keyboard.current;
+            if (dk != null && dk.f8Key.wasPressedThisFrame && (dk.leftCtrlKey.isPressed || dk.rightCtrlKey.isPressed) && (dk.leftShiftKey.isPressed || dk.rightShiftKey.isPressed))
+                ToggleDebugMode();
             if (!InMatch || cam == null) return;
             UpdateCamera();
             // moves from the server are shown one at a time, each after the previous animation
@@ -848,6 +851,7 @@ namespace FamiconWars.Game
             online = false;
             pendingLobby = null;
             hud.ShowOnline(NetConfig.DefaultAddress, roomCode, FwClient.IsConnected ? "接続しています" : "", false, NetConfig.PlayerName);
+            if (NetConfig.DebugMode) hud.SetOnlineName(NetConfig.PlayerName);   // each debug window its own name
         }
 
         void OnlineGo(string address, string action, string code)
@@ -964,6 +968,9 @@ namespace FamiconWars.Game
             if (ready.Count == 0) return;
             i = ((i < 0 ? 0 : i) + dir + ready.Count) % ready.Count;
             FwClient.RoomAction("map", 0, ready[i].Id);
+            // show the new map at once (the server's status confirms it), so quick clicks step on from it
+            var r = room.Value; r.mapId = ready[i].Id; room = r;
+            hud.ShowRoom(ToView(r), Preview);
         }
 
         /// <summary>From the game-over panel of an online match back to the room screen.</summary>
@@ -1055,6 +1062,23 @@ namespace FamiconWars.Game
             return ai[(int)a] == null ? "人間" : "COM " + ai[(int)a].Profile.Name;
         }
 
+        /// <summary>
+        /// Ctrl+Shift+F8 outside a room: a throw-away identity for this window so that several tabs on
+        /// one PC can join the same room as different people. Debug matches are not kept in the records.
+        /// </summary>
+        void ToggleDebugMode()
+        {
+            if (roomCode != null || online)
+            {
+                hud.Toast("デバッグモードは部屋に入る前に切り替えてください");
+                return;
+            }
+            NetConfig.SetDebugMode(!NetConfig.DebugMode);
+            hud.SetDebugBadge(NetConfig.DebugMode ? "DEBUG  " + NetConfig.PlayerName : null);
+            if (hud.OnlineLobbyVisible) hud.SetOnlineName(NetConfig.PlayerName);
+            hud.Toast(NetConfig.DebugMode ? "デバッグモード:このウィンドウは使い捨ての別人として部屋に入ります" : "デバッグモードを解除しました");
+        }
+
         void SaveRecord(Army winner, string reason)
         {
             if (recSaved || replaying) return;
@@ -1068,7 +1092,7 @@ namespace FamiconWars.Game
                 result = (winner == Army.None ? "引き分け" : Labels.Army(winner) + "の勝ち") + "(" + reason + ")",
                 cmds = cmds.ToArray(), seeds = seeds.Select(x => unchecked((int)x)).ToArray()
             };
-            MatchRecords.Add(rec);
+            if (!NetConfig.DebugMode) MatchRecords.Add(rec);     // debug matches stay out of the records
             lastRecord = rec;
             recSaved = true;
         }
