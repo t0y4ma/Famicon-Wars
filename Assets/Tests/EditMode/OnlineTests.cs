@@ -294,6 +294,186 @@ namespace FamiconWars.Tests
             Assert.AreEqual(2, list.SeatsTaken[0]);
         }
 
+        /// <summary>What a client does to work out a BOT move: ask its copy, skip moves the rules refuse.</summary>
+        static Command ShadowNext(AiPlayer ai, GameState s)
+        {
+            for (int k = 0; k < 64; k++)
+            {
+                var c = ai.Next(s);
+                if (c == null || RulesEngine.Check(s, c) == null) return c;
+                ai.Rejected(c);
+            }
+            return null;
+        }
+
+        /// <summary>Host (conn 1, red) against a BOT in blue, spectator conn 5. Returns the room code.</summary>
+        string StartBotMatch(int level = 2)
+        {
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Action(1, "bot", 1, level.ToString());
+            server.Action(1, "start", 0, null);
+            server.Join(5, code, "tokS", "観戦者");
+            return code;
+        }
+
+        [Test]
+        public void TheHostPlaysTheBotAndEveryClientCanCheckIt()
+        {
+            var code = StartBotMatch();
+            var room = server.Find(code);
+            var log = Last<GameLog>(1);
+            Assert.AreEqual(2, log.BotLevels[1]);
+            Assert.AreEqual(0, log.BotLevels[0]);
+            Assert.AreEqual(log.BotSeeds[1], Last<GameLog>(5).BotSeeds[1]);
+            var host = ReplicaFrom(log); var watch = ReplicaFrom(Last<GameLog>(5));
+            var hostBot = AiPlayer.ForOnline(Army.Blue, AiProfile.ForLevel(2), log.BotSeeds[1]);
+            var watchBot = AiPlayer.ForOnline(Army.Blue, AiProfile.ForLevel(2), log.BotSeeds[1]);
+            int seenH = 0, seenW = 0, botMoves = 0;
+            double t = 0;
+            void Sync()
+            {
+                var a1 = Box(1).OfType<Applied>().ToList();
+                for (; seenH < a1.Count; seenH++) Assert.IsNotNull(host.Step(a1[seenH].Index, a1[seenH].Cmd, a1[seenH].Seed, a1[seenH].Hash));
+                var a5 = Box(5).OfType<Applied>().ToList();
+                for (; seenW < a5.Count; seenW++)
+                {
+                    var a = a5[seenW];
+                    if (a.Cmd.StartsWith("U,1") || a.Cmd.StartsWith("P,1") || a.Cmd.StartsWith("E,1") || a.Cmd.StartsWith("R,1"))
+                        Assert.AreEqual(a.Cmd, CommandCodec.Encode(ShadowNext(watchBot, watch.State)), "the spectator's copy agrees at " + a.Index);
+                    Assert.IsNotNull(watch.Step(a.Index, a.Cmd, a.Seed, a.Hash));
+                }
+            }
+            for (int day = 0; day < 4 && !room.GameOver; day++)
+            {
+                server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+                Sync();
+                for (int k = 0; k < 300 && room.State.Active == Army.Blue && !room.GameOver; k++)
+                {
+                    server.Tick(t += 0.5);                                 // the server does not play it itself
+                    var c = ShadowNext(hostBot, host.State);
+                    server.BotPlay(1, CommandCodec.Encode(c));
+                    botMoves++;
+                    Sync();
+                }
+                Assert.AreEqual(Army.Red, room.State.Active, "the BOT ends its phase");
+            }
+            Assert.IsFalse(room.BotsOnServer);
+            Assert.IsFalse(Last<RoomStatus>(5).BotsOnServer);
+            Assert.Greater(botMoves, 6);
+            Assert.AreEqual(CommandCodec.Hash(room.State), CommandCodec.Hash(watch.State));
+        }
+
+        [Test]
+        public void OnlyTheHostSendsBotMoves()
+        {
+            var code = StartBotMatch();
+            var room = server.Find(code);
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+            int n = room.Cmds.Count;
+            server.BotPlay(5, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Blue }));
+            Assert.AreEqual(n, room.Cmds.Count, "a spectator cannot move the BOT");
+            Assert.IsFalse(room.BotsOnServer);
+            server.Play(1, "A,0");
+            Assert.IsNotNull(Last<Rejected>(1), "nobody can send the host's end-of-match command as a move");
+        }
+
+        [Test]
+        public void TheServerTakesTheBotsOverOnAMismatchAnIllegalMoveOrAStall()
+        {
+            // a spectator's copy disagrees
+            var code = StartBotMatch();
+            var room = server.Find(code);
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+            var host = ReplicaFrom(Last<GameLog>(1));
+            foreach (var a in Box(1).OfType<Applied>()) host.Step(a.Index, a.Cmd, a.Seed, a.Hash);
+            var hostBot = AiPlayer.ForOnline(Army.Blue, AiProfile.ForLevel(2), Last<GameLog>(1).BotSeeds[1]);
+            server.BotPlay(1, CommandCodec.Encode(ShadowNext(hostBot, host.State)));
+            server.BotMismatch(5, room.Cmds.Count - 1);
+            Assert.IsTrue(room.BotsOnServer);
+            Assert.IsTrue(Last<RoomStatus>(5).BotsOnServer);
+            double t = 100;
+            for (int k = 0; k < 400 && room.State.Active == Army.Blue && !room.GameOver; k++) server.Tick(t += 1);
+            Assert.AreEqual(Army.Red, room.State.Active, "the server finished the BOT's phase");
+
+            // the host sends a move the rules refuse
+            Setup();
+            code = StartBotMatch();
+            room = server.Find(code);
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+            server.BotPlay(1, "U,1,9999,0,0,0,-1,-1,0,0");
+            Assert.IsTrue(room.BotsOnServer);
+
+            // the host stops sending
+            Setup();
+            code = StartBotMatch();
+            room = server.Find(code);
+            server.Tick(1);
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+            server.Tick(10);
+            Assert.IsFalse(room.BotsOnServer);
+            server.Tick(1 + server.BotTimeout + 1);
+            Assert.IsTrue(room.BotsOnServer);
+        }
+
+        [Test]
+        public void AnOnlineBotCanBeRebuiltFromTheCurrentPhaseAlone()
+        {
+            // the host's copy has seen the whole game; a copy made mid-phase replays only this phase
+            var code = StartBotMatch(3);
+            var room = server.Find(code);
+            var log = Last<GameLog>(1);
+            var host = ReplicaFrom(log);
+            var full = AiPlayer.ForOnline(Army.Blue, AiProfile.ForLevel(3), log.BotSeeds[1]);
+            int seen = 0;
+            void Sync() { var a1 = Box(1).OfType<Applied>().ToList(); for (; seen < a1.Count; seen++) host.Step(a1[seen].Index, a1[seen].Cmd, a1[seen].Seed, a1[seen].Hash); }
+            for (int day = 0; day < 3; day++)
+            {
+                server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red })); Sync();
+                for (int k = 0; k < 300 && room.State.Active == Army.Blue; k++) { server.BotPlay(1, CommandCodec.Encode(ShadowNext(full, host.State))); Sync(); }
+            }
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red })); Sync();
+            for (int k = 0; k < 3 && room.State.Active == Army.Blue; k++) { server.BotPlay(1, CommandCodec.Encode(ShadowNext(full, host.State))); Sync(); }
+
+            // late joiner: rebuild up to the phase start, then replay the phase's BOT moves through a fresh copy
+            int start = room.Cmds.FindLastIndex(c => c.StartsWith("E,")) + 1;
+            var late = new OnlineReplica();
+            late.Rebuild(data, MapDef.Parse(mapText, data), room.Cmds.Take(start).ToArray(), room.Seeds.Take(start).ToArray());
+            var fresh = AiPlayer.ForOnline(Army.Blue, AiProfile.ForLevel(3), log.BotSeeds[1]);
+            for (int i = start; i < room.Cmds.Count; i++)
+            {
+                Assert.AreEqual(room.Cmds[i], CommandCodec.Encode(ShadowNext(fresh, late.State)));
+                late.Advance(room.Cmds[i], room.Seeds[i]);
+            }
+            Assert.AreEqual(CommandCodec.Encode(ShadowNext(full, host.State)), CommandCodec.Encode(ShadowNext(fresh, late.State)));
+        }
+
+        [Test]
+        public void TheHostCanEndTheMatchAndSetsTheSpeed()
+        {
+            var code = StartMatch();
+            var room = server.Find(code);
+            server.Action(2, "abort", 0, null);
+            Assert.IsNotNull(Last<LobbyError>(2));
+            Assert.IsFalse(room.GameOver);
+            var watch = ReplicaFrom(Last<GameLog>(2));
+            server.Action(1, "abort", 0, null);
+            Assert.IsTrue(room.GameOver);
+            Assert.AreEqual(Army.None, room.State.Winner);
+            var a = Last<Applied>(2);
+            Assert.AreEqual("A,0", a.Cmd);
+            Assert.IsNotNull(watch.Step(a.Index, a.Cmd, a.Seed, a.Hash));
+            Assert.IsTrue(watch.State.GameOver);
+            Assert.IsTrue(Last<RoomStatus>(2).GameOver);
+
+            server.Action(2, "speed", 2, null);
+            Assert.IsNotNull(Last<LobbyError>(2));
+            server.Action(1, "speed", 2, null);
+            Assert.AreEqual(2, Last<RoomStatus>(2).Speed);
+            server.Action(1, "speed", 9, null);
+            Assert.AreEqual(OnlineRoomServer.SpeedCount - 1, Last<RoomStatus>(2).Speed);
+        }
+
         [Test]
         public void RoomDisappearsWhenEveryoneIsGone()
         {

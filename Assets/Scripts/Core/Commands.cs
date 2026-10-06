@@ -29,6 +29,8 @@ namespace FamiconWars.Core
     public sealed class ResupplyAllCommand : Command { }
     public sealed class EndPhaseCommand : Command { }
     public sealed class SurrenderCommand : Command { }
+    /// <summary>The online room's host ends the match (a draw). Only the server issues it, never a player's command.</summary>
+    public sealed class AbortCommand : Command { }
 
     // ---- events for presentation ----
     public abstract class GameEvent { }

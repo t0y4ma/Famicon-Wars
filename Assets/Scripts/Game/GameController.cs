@@ -37,7 +37,9 @@ namespace FamiconWars.Game
         readonly List<(string label, System.Action act)> menu = new List<(string, System.Action)>();
         int hoverX = -1, hoverY = -1;
 
-        int Speed => settings.Speed;
+        /// <summary>Online the whole room plays at the host's speed (so everyone sees the same pace).</summary>
+        int Speed => online && room.HasValue ? Mathf.Clamp(room.Value.speed, 0, GameSettings.SpeedNames.Length - 1) : settings.Speed;
+        bool IAmHost => room.HasValue && room.Value.myId == room.Value.hostId;
 
         // online play
         bool online, awaiting;
@@ -78,6 +80,7 @@ namespace FamiconWars.Game
                 return;
             }
             settings = GameSettings.Load();
+            GameAudio.Apply(settings);
             if (MapCatalog.Find(settings.MapId) == null || !MapCatalog.Find(settings.MapId).Ready) settings.MapId = "map01";
 
             hud = gameObject.AddComponent<GameHud>();
@@ -86,18 +89,30 @@ namespace FamiconWars.Game
             hud.OnEndPhase += () => { if (!HumanTurn) return; Cancel(); Try(new EndPhaseCommand { Army = state.Active }); };
             hud.OnSurrender += () => { if (!HumanTurn) return; Cancel(); Try(new SurrenderCommand { Army = state.Active }); };
             hud.OnCloseProduce += Cancel;
-            hud.OnSpeed += () => { settings.Speed = (settings.Speed + 1) % GameSettings.SpeedNames.Length; settings.Save(); RefreshHud(); };
+            hud.OnSpeed += () =>
+            {
+                if (online && room.HasValue && !IAmHost) { hud.Toast("オンラインでは部屋主の速度に合わせます"); return; }
+                settings.Speed = (settings.Speed + 1) % GameSettings.SpeedNames.Length; settings.Save();
+                if (online && room.HasValue) FwClient.RoomAction("speed", settings.Speed);
+                RefreshHud();
+            };
+            hud.OnAbortMatch += () =>
+            {
+                if (online) { if (IAmHost) FwClient.RoomAction("abort"); }
+                else AbortOffline();
+            };
 
             hud.OnTitleStart += ShowMapSelect;
             hud.OnMapBack += ShowTitle;
             hud.OnMapPicked += id => { var m = MapCatalog.Find(id); if (m != null && m.Ready) settings.MapId = id; };
             hud.OnMapNext += ShowSetup;
             hud.OnSetupBack += ShowMapSelect;
-            hud.OnSetupStart += () => { settings.Save(); StartMatch(); };
+            hud.OnSetupStart += () => { settings.Save(); GameAudio.Apply(settings); StartMatch(); };
             hud.OnRestart += () => { if (online) BackToRoom(); else ShowSetup(); };
             hud.OnBackToTitle += () => { if (online || FwClient.IsConnected) { LeaveOnline(); FwClient.Disconnect(); } ShowTitle(); };
 
             hud.OnTitleOnline += ShowOnlineLobby;
+            hud.OnSoundSettings += () => hud.ShowSoundPanel(settings);
             hud.OnOnlineBack += () => { FwClient.Disconnect(); ShowTitle(); };
             hud.OnOnlineCreate += addr => OnlineGo(addr, "create", null);
             hud.OnOnlineJoin += (addr, code) => OnlineGo(addr, "join", code);
@@ -164,6 +179,7 @@ namespace FamiconWars.Game
             hud.SkipBattle();
             hud.ResetScreens();
             hud.ShowMatchChrome(false);
+            hud.SetAbortButton(false);
             if (board != null) { board.ClearHighlights(); board.SetCursor(0, 0, false); board.gameObject.SetActive(false); }
         }
 
@@ -264,6 +280,8 @@ namespace FamiconWars.Game
         const float MinBoardShare = 0.2f;    // the board must cover at least this much of the screen
         float camFit, camSize, camHome;
         Vector3 camGoal, camHomePos;
+        bool rDrag, rDragMoved;                // right button held on the board / moved far enough to be a drag
+        Vector2 rDragStart, rDragLast;
         string camKey;
 
         void SetupCamera()
@@ -367,8 +385,31 @@ namespace FamiconWars.Game
                 ShowZoom();
             }
 
+            // right button held and dragged: the board follows the cursor (a right click without moving still cancels)
+            if (mouse.rightButton.wasPressedThisFrame)
+            {
+                rDrag = inside && !hud.PointerOverUi && !hud.BattlePlaying;
+                rDragMoved = false; rDragStart = rDragLast = mp;
+            }
+            if (rDrag)
+            {
+                if (!mouse.rightButton.isPressed) rDrag = false;
+                else
+                {
+                    var d = mp - rDragLast; rDragLast = mp;
+                    if (!rDragMoved && (mp - rDragStart).sqrMagnitude > 64f) rDragMoved = true;
+                    if (rDragMoved && d != Vector2.zero)
+                    {
+                        float upp = cam.orthographicSize * 2f / Mathf.Max(1, Screen.height);
+                        var shift = new Vector3(-d.x * upp, -d.y * upp, 0);
+                        camGoal = ClampCam(camGoal + shift);
+                        cam.transform.position = ClampCam(cam.transform.position + shift);
+                    }
+                }
+            }
+
             // cursor at a screen edge: scroll (faster when zoomed out)
-            if (inside && Application.isFocused && !hud.BattlePlaying)
+            if (inside && Application.isFocused && !hud.BattlePlaying && !rDrag)
             {
                 var dir = Vector2.zero;
                 if (mp.x <= EdgePx) dir.x = -1; else if (mp.x >= Screen.width - EdgePx) dir.x = 1;
@@ -415,8 +456,92 @@ namespace FamiconWars.Game
 
         void RefreshHud()
         {
+            // online: the host only; offline: anyone, at any time (e.g. to end a COM vs COM match at once)
+            hud.SetAbortButton(InMatch && !replaying && state != null && !state.GameOver && (!online || IAmHost));
             if (!InMatch) return;
             hud.SetTopBar(state, Income(state.Active), ControllerName(state.Active), HumanTurn, GameSettings.SpeedNames[Speed]);
+        }
+
+        // ---------------- sound ----------------
+
+        float gameOverAt = -1;
+
+        /// <summary>The track for what is on screen: title, menus, each army's phase, the review, the result.</summary>
+        void UpdateMusic()
+        {
+            string want;
+            if (replaying) want = "replay";
+            else if (InMatch)
+            {
+                if (state.GameOver)
+                {
+                    if (gameOverAt < 0) gameOverAt = Time.unscaledTime;
+                    want = Time.unscaledTime - gameOverAt < 3f ? null : "result";   // the fanfare plays first
+                }
+                else { gameOverAt = -1; want = state.Active == Army.Red ? "red" : "blue"; }
+            }
+            else { gameOverAt = -1; want = hud.TitleMusicScreen ? "title" : "menu"; }
+            GameAudio.Music(want);
+        }
+
+        /// <summary>Sounds for what a command did (the battle cut-in plays its own).</summary>
+        void PlayEventSounds(ApplyResult r, bool cutIn)
+        {
+            foreach (var e in r.Events)
+            {
+                switch (e)
+                {
+                    case MovedEvent m:
+                    {
+                        var u = state.UnitById(m.UnitId);
+                        if (u == null || m.Path == null || m.Path.Count < 2) break;
+                        switch (state.Def(u).MoveClass)
+                        {
+                            case MoveClass.Foot: GameAudio.Se("move_foot", 0.7f); break;
+                            case MoveClass.Vehicle: GameAudio.Se("move_engine", 0.7f); break;
+                            case MoveClass.Air: GameAudio.Se("move_air", 0.7f); break;
+                            case MoveClass.Ship: GameAudio.Se("move_ship", 0.7f); break;
+                        }
+                        break;
+                    }
+                    case BattleEvent b when !cutIn:
+                        GameAudio.Se(b.DefenderDestroyed || b.AttackerDestroyed ? "explode" : "hit", 0.8f);
+                        break;
+                    case CaptureEvent c: GameAudio.Se(c.Completed ? "capture_done" : "capture_step"); break;
+                    case ProducedEvent _: GameAudio.Se("produce"); break;
+                    case JoinedEvent _: GameAudio.Se("join"); break;
+                    case ResuppliedEvent _: GameAudio.Se("resupply"); break;
+                    case PhaseStartEvent _: GameAudio.Se("phase_start", 0.8f, 0); break;
+                    case UnitLostEvent l when l.Reason != "撃破": GameAudio.Se("explode", 0.6f); break;
+                }
+            }
+        }
+
+        /// <summary>Offline: ends the match at once as a draw (recorded like any other move).</summary>
+        void AbortOffline()
+        {
+            if (online || !InMatch || replaying || state.GameOver) return;
+            hud.SkipBattle();
+            paused = false;
+            selected = null;
+            var r = ApplyRecorded(new AbortCommand { Army = state.Active });
+            if (!r.Ok) return;
+            board.ClearHighlights();
+            Report(r, null);
+            board.Refresh();
+            RefreshHud();
+        }
+
+        /// <summary>Fanfare for the end of a match, from the point of view of the player at this screen.</summary>
+        void PlayResultSound(Army winner)
+        {
+            if (winner == Army.None) return;          // a draw (time limit, ended by hand): no fanfare
+            int me = -1;
+            if (online) me = myArmy;
+            else if (ai[0] == null && ai[1] != null) me = 0;
+            else if (ai[1] == null && ai[0] != null) me = 1;
+            bool won = winner != Army.None && (me < 0 || (int)winner == me);
+            GameAudio.Se(won ? "victory" : "defeat", 1f, 0);
         }
 
         // ---------------- input ----------------
@@ -432,10 +557,12 @@ namespace FamiconWars.Game
                 nextListAt = Time.unscaledTime + 5f;
                 FwClient.RequestRoomList();
             }
+            UpdateMusic();
             if (!InMatch || cam == null) return;
             UpdateCamera();
             // moves from the server are shown one at a time, each after the previous animation
             if (online && incoming.Count > 0 && !hud.BattlePlaying && !hud.BannerShowing) ApplyIncoming(incoming.Dequeue());
+            if (online) PlayHostBot();
             if (online && onlineBot != null && HumanTurn && !hud.BattlePlaying && !hud.BannerShowing && Time.unscaledTime >= botNext)
             {
                 botNext = Time.unscaledTime + 0.15f;
@@ -486,8 +613,8 @@ namespace FamiconWars.Game
             if (!HumanTurn) return;   // the COM drives the cursor during its phase
 
             board.SetCursor(hoverX, hoverY, !overUi && mode != Mode.GameOver && mode != Mode.Produce);
-            bool cancel = mouse.rightButton.wasPressedThisFrame || (kb != null && kb.escapeKey.wasPressedThisFrame);
-            if (cancel) { Cancel(); return; }
+            bool cancel = (mouse.rightButton.wasReleasedThisFrame && !rDragMoved) || (kb != null && kb.escapeKey.wasPressedThisFrame);
+            if (cancel) { if (mode != Mode.Idle) GameAudio.Se("ui_cancel", 0.8f, 0); Cancel(); return; }
             if (!mouse.leftButton.wasPressedThisFrame || overUi) return;
             if (!state.InBounds(hoverX, hoverY)) { Cancel(); return; }
             Click(hoverX, hoverY);
@@ -507,7 +634,6 @@ namespace FamiconWars.Game
                 if (cmd == null) break;
                 float d = GameSettings.SpeedDelay[Speed];
 
-                FocusOn(cmd);
                 if (d > 0) yield return ShowIntent(cmd, d);
 
                 var cast = BattleCast(cmd);
@@ -651,6 +777,7 @@ namespace FamiconWars.Game
 
         void Select(UnitState u)
         {
+            GameAudio.Se("unit_select", 0.8f, 0);
             selected = u;
             reach = Movement.Reachable(state, u);
             mode = Mode.Selected;
@@ -842,6 +969,7 @@ namespace FamiconWars.Game
                 }
             }
             if (lines.Count > 0) hud.Toast(string.Join("\n", lines));
+            PlayEventSounds(r, cutIn);
             return cutIn;
         }
 
@@ -849,6 +977,7 @@ namespace FamiconWars.Game
         {
             yield return null;   // the cut-in for the final blow starts in the same frame
             while (hud.BattlePlaying) yield return null;
+            PlayResultSound(g.Winner);
             hud.ShowGameOver(g.Winner, g.Reason);
         }
 
@@ -968,7 +1097,11 @@ namespace FamiconWars.Game
 
         void OnNetStatus(RoomStatusMsg m)
         {
+            bool wasOnServer = room.HasValue && room.Value.botsOnServer;
             room = m;
+            // the host's speed is the room's speed
+            if (m.myId == m.hostId && m.speed != settings.Speed) FwClient.RoomAction("speed", settings.Speed);
+            if (m.botsOnServer && !wasOnServer && online && InMatch && !replaying) hud.Toast("ここからはサーバーが BOT を動かします");
             roomCode = m.code;
             if (replaying) return;               // reviewing a match: the room screen comes back on exit
             myArmy = m.mySeat;
@@ -1056,6 +1189,7 @@ namespace FamiconWars.Game
             replica = new OnlineReplica();
             replica.Rebuild(data, map, m.cmds ?? new string[0], m.seeds ?? new uint[0]);
             state = replica.State;
+            SetupBotCopies(m, map);
             recMapId = m.mapId; recSaved = false;
             BuildBoard();
             hud.ShowMatchChrome(true);
@@ -1075,11 +1209,89 @@ namespace FamiconWars.Game
             incoming.Enqueue(m);
         }
 
+        // ---------------- online BOT seats (played on the host's PC, checked by everyone) ----------------
+
+        readonly AiPlayer[] botCopies = new AiPlayer[2];  // this client's copy of each BOT seat of the match
+        string botSent;                                    // BOT move this client (as host) sent, not applied yet
+        float botSendAt;
+        bool botCheckFailed;                               // a mismatch was reported: stop checking
+
+        bool BotsOnServer => room.HasValue && room.Value.botsOnServer;
+        static bool IsBotMove(Command c) => !(c is SurrenderCommand) && !(c is AbortCommand);
+
+        /// <summary>The BOT's next move on this state, skipping moves the rules refuse (the same on every client).</summary>
+        static Command BotNext(AiPlayer ai, GameState s)
+        {
+            for (int k = 0; k < 64; k++)
+            {
+                var c = ai.Next(s);
+                if (c == null || RulesEngine.Check(s, c) == null) return c;
+                ai.Rejected(c);
+            }
+            return null;
+        }
+
+        /// <summary>Copies of the match's BOTs; a client joining mid-game replays the current phase into them.</summary>
+        void SetupBotCopies(GameLogMsg m, MapDef map)
+        {
+            botSent = null; botCheckFailed = false;
+            bool any = false;
+            for (int s = 0; s < 2; s++)
+            {
+                int level = m.botLevels != null && m.botLevels.Length > s ? m.botLevels[s] : 0;
+                botCopies[s] = level > 0 && m.botSeeds != null ? AiPlayer.ForOnline((Army)s, AiProfile.ForLevel(level), m.botSeeds[s]) : null;
+                any |= botCopies[s] != null;
+            }
+            var cmds = m.cmds ?? new string[0];
+            if (!any || cmds.Length == 0 || state.GameOver) return;
+            int start = 0;
+            for (int i = cmds.Length - 1; i >= 0; i--) if (cmds[i].StartsWith("E,")) { start = i + 1; break; }
+            var seeds = m.seeds ?? new uint[0];
+            var temp = new OnlineReplica();
+            temp.Rebuild(data, map, cmds.Take(start).ToArray(), seeds.Take(start).ToArray());
+            for (int i = start; i < cmds.Length; i++)
+            {
+                var c = CommandCodec.Decode(cmds[i]);
+                if (c != null && IsBotMove(c) && botCopies[(int)c.Army] != null) BotNext(botCopies[(int)c.Army], temp.State);
+                temp.Advance(cmds[i], seeds[i]);
+            }
+        }
+
+        /// <summary>Host: works out and sends the move of the BOT whose turn it is, paced like the COM offline.</summary>
+        void PlayHostBot()
+        {
+            if (BotsOnServer) { botSent = null; return; }
+            if (replica == null || replaying || !InMatch || state.GameOver || !IAmHost || botSent != null) return;
+            if (incoming.Count > 0 || hud.BattlePlaying || hud.BannerShowing || Time.unscaledTime < botSendAt) return;
+            var copy = botCopies[(int)state.Active];
+            if (copy == null) return;
+            var c = BotNext(copy, state);
+            if (c == null) return;
+            botSent = CommandCodec.Encode(c);
+            FwClient.BotPlay(botSent);
+            botSendAt = Time.unscaledTime + Mathf.Max(0.12f, GameSettings.SpeedDelay[Speed] * 1.5f);
+        }
+
+        /// <summary>Every client checks each BOT move against its own copy; a mismatch hands the BOTs to the server.</summary>
+        void CheckBotMove(AppliedMsg m, Command cmd)
+        {
+            if (cmd == null || !IsBotMove(cmd) || BotsOnServer || botCheckFailed) return;
+            var copy = botCopies[(int)cmd.Army];
+            if (copy == null) return;
+            if (botSent != null && botSent == m.cmd) { botSent = null; return; }     // the move this client sent
+            var expect = BotNext(copy, replica.State);
+            if (expect == null || CommandCodec.Encode(expect) != m.cmd)
+            {
+                botCheckFailed = true;
+                FwClient.ReportBotMismatch(m.index);
+            }
+        }
+
         void ApplyIncoming(AppliedMsg m)
         {
             if (!online || replica == null) return;
             var cmd = CommandCodec.Decode(m.cmd);
-            if (cmd != null && (int)cmd.Army != myArmy) FocusOn(cmd);
+            CheckBotMove(m, cmd);
             var cast = cmd != null ? BattleCast(cmd) : null;
             var r = replica.Step(m.index, m.cmd, m.seed, m.hash);
             if (r == null) { incoming.Clear(); FwClient.RequestResync(); return; }
@@ -1195,7 +1407,6 @@ namespace FamiconWars.Game
             var c = CommandCodec.Decode(replayRec.cmds[replayIndex]);
             if (c == null) { replayIndex = replayRec.cmds.Length; return; }
             string what = Describe(c);
-            if (animate) FocusOn(c);
             var cast = animate ? BattleCast(c) : null;
             state.Rng = new Rng(replayRec.Seed(replayIndex));
             var r = RulesEngine.Apply(state, c);
@@ -1271,6 +1482,7 @@ namespace FamiconWars.Game
                 case EndPhaseCommand _: return side + "手番終了";
                 case ResupplyAllCommand _: return side + "全補";
                 case SurrenderCommand _: return side + "降伏";
+                case AbortCommand _: return "対戦を途中で終了";
             }
             return side;
         }

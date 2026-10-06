@@ -23,16 +23,21 @@ namespace FamiconWars.Net
     /// <summary>Room screen actions: sit / stand / bot / map / host / public / start / reset (see OnlineRoomServer.Action).</summary>
     public struct RoomActionMsg : NetworkMessage { public string action; public int arg; public string text; }
     public struct PlayMsg : NetworkMessage { public string cmd; }
+    /// <summary>Host only: the move of the BOT seat whose turn it is (worked out on the host's PC).</summary>
+    public struct BotPlayMsg : NetworkMessage { public string cmd; }
+    /// <summary>This client's copy of the BOT disagrees with the BOT move at index (the server takes the BOTs over).</summary>
+    public struct BotMismatchMsg : NetworkMessage { public int index; }
     public struct ResyncMsg : NetworkMessage { }
 
     public struct RoomStatusMsg : NetworkMessage
     {
         public string code; public string mapId; public bool started, gameOver, isPublic;
         public int myId, mySeat, hostId;
+        public int speed; public bool botsOnServer;
         public int[] seatKinds; public string[] seatNames; public int[] seatLevels; public bool[] seatOnline;
         public int[] memberIds; public string[] memberNames; public int[] memberSeats; public bool[] memberOnline;
     }
-    public struct GameLogMsg : NetworkMessage { public string mapId; public int myArmy; public string[] cmds; public uint[] seeds; }
+    public struct GameLogMsg : NetworkMessage { public string mapId; public int myArmy; public string[] cmds; public uint[] seeds; public uint[] botSeeds; public int[] botLevels; }
     public struct AppliedMsg : NetworkMessage { public int index; public string cmd; public uint seed; public int hash; }
     public struct RejectedMsg : NetworkMessage { public string error; }
     public struct LobbyErrorMsg : NetworkMessage { public string error; }
@@ -45,7 +50,7 @@ namespace FamiconWars.Net
     public static class NetConfig
     {
         /// <summary>Bump whenever messages or rules change: client and server must match.</summary>
-        public const int ProtocolVersion = 3;
+        public const int ProtocolVersion = 4;
         public static ushort ServerPort = 7782;
         public const string PublicUrl = "wss://nine.freeddns.org/fw";
         public const string TokenKey = "fw.clientToken";
@@ -192,6 +197,8 @@ namespace FamiconWars.Net
             NetworkServer.RegisterHandler<LeaveRoomMsg>((c, m) => rooms.Leave(c.connectionId, true), false);
             NetworkServer.RegisterHandler<RoomActionMsg>((c, m) => rooms.Action(c.connectionId, m.action, m.arg, m.text), false);
             NetworkServer.RegisterHandler<PlayMsg>((c, m) => rooms.Play(c.connectionId, m.cmd), false);
+            NetworkServer.RegisterHandler<BotPlayMsg>((c, m) => rooms.BotPlay(c.connectionId, m.cmd), false);
+            NetworkServer.RegisterHandler<BotMismatchMsg>((c, m) => rooms.BotMismatch(c.connectionId, m.index), false);
             NetworkServer.RegisterHandler<ResyncMsg>((c, m) => rooms.Resync(c.connectionId), false);
             Debug.Log("[FW] server started on port " + NetConfig.ServerPort);
         }
@@ -232,12 +239,12 @@ namespace FamiconWars.Net
                     c.Send(new RoomStatusMsg
                     {
                         code = s.Code, mapId = s.MapId, started = s.Started, gameOver = s.GameOver, isPublic = s.Public,
-                        myId = s.MyId, mySeat = s.MySeat, hostId = s.HostId,
+                        myId = s.MyId, mySeat = s.MySeat, hostId = s.HostId, speed = s.Speed, botsOnServer = s.BotsOnServer,
                         seatKinds = new[] { (int)s.SeatKinds[0], (int)s.SeatKinds[1] }, seatNames = s.SeatNames, seatLevels = s.SeatLevels, seatOnline = s.SeatOnline,
                         memberIds = s.MemberIds, memberNames = s.MemberNames, memberSeats = s.MemberSeats, memberOnline = s.MemberOnline
                     });
                     break;
-                case GameLog l: c.Send(new GameLogMsg { mapId = l.MapId, myArmy = l.MyArmy, cmds = l.Cmds, seeds = l.Seeds }); break;
+                case GameLog l: c.Send(new GameLogMsg { mapId = l.MapId, myArmy = l.MyArmy, cmds = l.Cmds, seeds = l.Seeds, botSeeds = l.BotSeeds, botLevels = l.BotLevels }); break;
                 case Applied a: c.Send(new AppliedMsg { index = a.Index, cmd = a.Cmd, seed = a.Seed, hash = a.Hash }); break;
                 case Rejected r: c.Send(new RejectedMsg { error = r.Error }); break;
                 case LobbyError e: c.Send(new LobbyErrorMsg { error = e.Error }); break;
@@ -321,6 +328,8 @@ namespace FamiconWars.Net
         public static void LeaveRoom() => NetworkClient.Send(new LeaveRoomMsg());
         public static void RoomAction(string action, int arg = 0, string text = null) => NetworkClient.Send(new RoomActionMsg { action = action, arg = arg, text = text ?? "" });
         public static void Play(Command c) => NetworkClient.Send(new PlayMsg { cmd = CommandCodec.Encode(c) });
+        public static void BotPlay(string cmd) => NetworkClient.Send(new BotPlayMsg { cmd = cmd });
+        public static void ReportBotMismatch(int index) => NetworkClient.Send(new BotMismatchMsg { index = index });
         public static void RequestResync() => NetworkClient.Send(new ResyncMsg());
 
         internal static void Raise(RoomStatusMsg m) => Status?.Invoke(m);

@@ -117,6 +117,8 @@ namespace FamiconWars.Game
 
             var back = MakeButton("Back", onlineRoot, "戻る", false, () => OnOnlineBack?.Invoke());
             Pin((RectTransform)back.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(96, 56), new Vector2(200, 64), pivot: new Vector2(0, 0));
+            var sound = MakeButton("Sound", onlineRoot, "サウンド", false, () => OnSoundSettings?.Invoke());
+            Pin((RectTransform)sound.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(320, 56), new Vector2(220, 64), pivot: new Vector2(0, 0));
 
             // ---- room screen (its own full-screen page; built once, updated on every status) ----
             roomRoot = Panel("Room", canvasRt, Backdrop);
@@ -130,6 +132,34 @@ namespace FamiconWars.Game
 
             onlineRoot.gameObject.SetActive(false);
             roomRoot.gameObject.SetActive(false);
+        }
+
+        // ---- host: end the current match (under the top bar, left of the zoom readout) ----
+        public event Action OnAbortMatch;
+        Button abortBtn;
+        float abortArmedUntil = -1;
+
+        /// <summary>Shown to the host during an online match. The first click asks, the second (within 4 s) ends it.</summary>
+        public void SetAbortButton(bool visible)
+        {
+            if (abortBtn == null)
+            {
+                if (!visible) return;
+                abortBtn = MakeButton("AbortMatch", canvasRt, "対局を終了", false, () =>
+                {
+                    if (Time.unscaledTime <= abortArmedUntil) { abortArmedUntil = -1; SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "対局を終了"); OnAbortMatch?.Invoke(); return; }
+                    abortArmedUntil = Time.unscaledTime + 4f;
+                    SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "<color=#F07A62>もう一度押すと終了</color>");
+                });
+                Pin((RectTransform)abortBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-336, -92), new Vector2(260, 52), pivot: new Vector2(1, 1));
+            }
+            if (abortArmedUntil >= 0 && Time.unscaledTime > abortArmedUntil)
+            {
+                abortArmedUntil = -1;
+                SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "対局を終了");
+            }
+            if (visible && !abortBtn.gameObject.activeSelf) abortBtn.transform.SetAsLastSibling();
+            SetActive(abortBtn, visible);
         }
 
         // ---- public rooms (right side of the lobby) ----

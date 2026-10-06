@@ -282,6 +282,7 @@ namespace FamiconWars.Game
 
         public void Toast(string text, bool warning = false)
         {
+            if (warning) GameAudio.Se("ui_error", 0.8f, 0);
             toastText.text = text;
             toastText.color = warning ? Danger : Paper;
             int lines = text.Split('\n').Length;
@@ -530,7 +531,7 @@ namespace FamiconWars.Game
             b.colors = ButtonColors(b.colors, primary);
             var baseC = primary ? Brass : PlateRaised;
             img.canvasRenderer.SetColor(baseC);   // start at the final colour: no white flash on creation
-            b.onClick.AddListener(() => onClick());
+            b.onClick.AddListener(() => { GameAudio.Se("ui_click", 0.8f, 0); onClick(); });
             // focus bar on the left edge: selected state must read from a distance
             var focus = Panel("Focus", rt, Brass); focus.GetComponent<Image>().raycastTarget = false;
             focus.GetComponent<Image>().enabled = false;   // shown by FocusMarker only while selected (no one-frame flash)

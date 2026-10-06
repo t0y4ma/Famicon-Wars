@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace FamiconWars.Core
@@ -104,6 +104,25 @@ namespace FamiconWars.Core
             Army = army; Profile = profile; rng = new Rng(seed);
         }
 
+        // Online BOTs: every phase starts from a state that depends only on (seed, day, army), so any
+        // client can compute the BOT's moves (the room host plays them, the others check them), and a
+        // client that joins mid-game only has to replay the current phase.
+        bool phaseSeeded;
+        uint phaseSeedBase;
+
+        public static AiPlayer ForOnline(Army army, AiProfile profile, uint seed) =>
+            new AiPlayer(army, profile, seed) { phaseSeeded = true, phaseSeedBase = seed };
+
+        static uint PhaseSeed(uint seed, int key)
+        {
+            unchecked
+            {
+                uint x = seed ^ ((uint)key * 0x9E3779B9u);
+                x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+                return x | 1u;
+            }
+        }
+
         Army Foe => Army == Army.Red ? Army.Blue : Army.Red;
 
         public Command Next(GameState s)
@@ -114,6 +133,7 @@ namespace FamiconWars.Core
             {
                 phaseKey = key; commandsThisPhase = 0; resupplyConsidered = false; savingThisPhase = false; lateCapThisPhase = false; strategicPlanned = false; strategic = null;
                 forceWait.Clear(); done.Clear(); productionTried.Clear();
+                if (phaseSeeded) { rng = new Rng(PhaseSeed(phaseSeedBase, key)); reliefUnit = reliefTile = -1; }
             }
             if (++commandsThisPhase > 300) return new EndPhaseCommand { Army = Army };
             if (simData == null)

@@ -397,6 +397,35 @@ namespace FamiconWars.Game
             ApplyBattleFrame(0);
         }
 
+        static string WeaponSound(Sil k)
+        {
+            switch (k)
+            {
+                case Sil.Bazooka: case Sil.Tank: case Sil.HeavyTank: case Sil.Ship: case Sil.Lander: return "shot_cannon";
+                case Sil.Artillery: return "shot_artillery";
+                case Sil.Rocket: case Sil.Jet: case Sil.Bomber: return "shot_missile";
+            }
+            return "shot_rifle";
+        }
+
+        /// <summary>One shot sound per volley, one impact per volley, and a blast for each machine lost.</summary>
+        void BattleSounds(float a, float b)
+        {
+            for (int si = 0; si < 2; si++)
+            {
+                float fire = float.MaxValue, hit = float.MaxValue;
+                foreach (var sh in shots) if (sh.From == si) { fire = Mathf.Min(fire, sh.Fire); hit = Mathf.Min(hit, sh.Hit); }
+                if (fire == float.MaxValue) continue;
+                if (a < fire && fire <= b) GameAudio.Se(WeaponSound(sides[si].Sil));
+                var them = sides[1 - si];
+                bool killNow = false, hitNow = a < hit && hit <= b;
+                for (int i = 0; i < 10; i++)
+                    if (them.Lost[i] && them.HitTime[i] >= 0 && a < them.HitTime[i] && them.HitTime[i] <= b) killNow = true;
+                if (killNow) GameAudio.Se("explode", 0.9f, 0.06f);
+                else if (hitNow) GameAudio.Se("hit", 0.9f, 0.08f);
+            }
+        }
+
         static Vector2 ProjSize(Sil k)
         {
             switch (k)
@@ -453,7 +482,9 @@ namespace FamiconWars.Game
         void UpdateBattle()
         {
             if (battleT < 0) return;
+            float prev = battleT;
             battleT += Time.unscaledDeltaTime / battleScale;
+            BattleSounds(prev, battleT);
             if (battleT >= battleEnd) { SkipBattle(); return; }
             ApplyBattleFrame(battleT);
         }

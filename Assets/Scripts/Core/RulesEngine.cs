@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace FamiconWars.Core
@@ -21,7 +21,7 @@ namespace FamiconWars.Core
         {
             if (s.GameOver) return "対戦は終了しています";
             // surrender is allowed at any time (an online player who leaves gives up even off-turn)
-            if (c.Army != s.Active && !(c is SurrenderCommand)) return "手番ではありません";
+            if (c.Army != s.Active && !(c is SurrenderCommand) && !(c is AbortCommand)) return "手番ではありません";
             switch (c)
             {
                 case UnitCommand uc: return CheckUnit(s, uc, out _, out _);
@@ -29,6 +29,7 @@ namespace FamiconWars.Core
                 case ResupplyAllCommand _: return CheckResupply(s, out _, out _);
                 case EndPhaseCommand _: return null;
                 case SurrenderCommand _: return null;
+                case AbortCommand _: return null;
             }
             return "不明なコマンド";
         }
@@ -45,6 +46,7 @@ namespace FamiconWars.Core
                 case ResupplyAllCommand _: ExecResupply(s, r); break;
                 case EndPhaseCommand _: EndPhase(s, r); break;
                 case SurrenderCommand _: Finish(s, Other(c.Army), "降伏", r); break;
+                case AbortCommand _: Finish(s, Army.None, "対戦を途中で終了", r); break;
             }
             return r;
         }

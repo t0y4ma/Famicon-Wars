@@ -5,7 +5,7 @@ namespace FamiconWars.Core
 {
     /// <summary>
     /// Compact text form of a Command for the network and for logs (a few dozen bytes each).
-    /// U = unit command, P = produce, R = resupply all, E = end phase, S = surrender.
+    /// U = unit command, P = produce, R = resupply all, E = end phase, S = surrender, A = match ended by the host.
     /// </summary>
     public static class CommandCodec
     {
@@ -20,6 +20,7 @@ namespace FamiconWars.Core
                 case ResupplyAllCommand _: return $"R,{a}";
                 case EndPhaseCommand _: return $"E,{a}";
                 case SurrenderCommand _: return $"S,{a}";
+                case AbortCommand _: return $"A,{a}";
             }
             throw new ArgumentException("unknown command " + c.GetType().Name);
         }
@@ -49,6 +50,7 @@ namespace FamiconWars.Core
                     case "R": return new ResupplyAllCommand { Army = army };
                     case "E": return new EndPhaseCommand { Army = army };
                     case "S": return new SurrenderCommand { Army = army };
+                    case "A": return new AbortCommand { Army = army };
                 }
             }
             catch (FormatException) { }

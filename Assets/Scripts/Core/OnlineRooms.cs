@@ -15,6 +15,13 @@ namespace FamiconWars.Core
     // else, and starts the match once both seats are filled. Spectators watch the match live.
     // After a match the room can be rearranged right away (seats, map, BOTs) and the next match
     // started; the finished game stays available until then. Public rooms are listed in the lobby.
+    //
+    // BOT seats are played by the host's client, not the server (to spare the server's CPU): the
+    // BOT is a deterministic AiPlayer.ForOnline with a seed from the server, so every client can work
+    // out the same move. The host sends it; the other clients check each BOT move against their own
+    // copy and report a mismatch. On a mismatch, a refused BOT move or a host that stops sending,
+    // the server takes the BOTs over for the rest of the match.
+    // The animation speed is the host's, so everyone sees the match at the same pace.
     // ------------------------------------------------------------------------------------------
 
     public enum SeatKind { Empty = 0, Human = 1, Bot = 2 }
@@ -27,6 +34,8 @@ namespace FamiconWars.Core
         public string Code, MapId;
         public bool Started, GameOver, Public;
         public int MyId, MySeat, HostId;
+        public int Speed;                            // the host's game speed (index into the speed list)
+        public bool BotsOnServer;                    // the server plays the BOT seats (else the host does)
         public SeatKind[] SeatKinds = new SeatKind[2];
         public string[] SeatNames = new string[2];
         public int[] SeatLevels = new int[2];        // BOT strength 1-4
@@ -34,7 +43,12 @@ namespace FamiconWars.Core
         public int[] MemberIds; public string[] MemberNames; public int[] MemberSeats; public bool[] MemberOnline;
     }
     /// <summary>Everything needed to rebuild the game: map + every accepted command with its seed. MyArmy -1 = spectator.</summary>
-    public sealed class GameLog : ServerMsg { public string MapId; public int MyArmy; public string[] Cmds; public uint[] Seeds; }
+    public sealed class GameLog : ServerMsg
+    {
+        public string MapId; public int MyArmy; public string[] Cmds; public uint[] Seeds;
+        public uint[] BotSeeds = new uint[2];        // AiPlayer.ForOnline seed per BOT seat
+        public int[] BotLevels = new int[2];         // 0 = not a BOT
+    }
     public sealed class Applied : ServerMsg { public int Index; public string Cmd; public uint Seed; public int Hash; }
     public sealed class Rejected : ServerMsg { public string Error; }
     public sealed class LobbyError : ServerMsg { public string Error; }
@@ -70,6 +84,13 @@ namespace FamiconWars.Core
         public readonly AiPlayer[] Bots = new AiPlayer[2];
         public int HostId = -1, NextMemberId = 1;
         public double BotNextTime;
+        public int Speed = 1;
+        /// <summary>The match's BOT seats: seeds for AiPlayer.ForOnline and strengths (fixed at the start).</summary>
+        public readonly uint[] BotSeeds = new uint[2];
+        public readonly int[] MatchBotLevels = new int[2];
+        public bool BotsOnServer;
+        /// <summary>Last time a command was applied (a host that stops sending BOT moves is replaced).</summary>
+        public double LastActivity;
         public bool Started => State != null;
         public bool GameOver => State != null && State.GameOver;
         /// <summary>Seats, map and BOTs can change: before a match or once it is over.</summary>
@@ -83,6 +104,10 @@ namespace FamiconWars.Core
     public sealed class OnlineRoomServer
     {
         public const int MaxMembers = 16;
+        public const int SpeedCount = 4;
+        /// <summary>Seconds without a BOT move from the host before the server plays the BOTs itself.</summary>
+        public double BotTimeout = 20;
+        double now;
         /// <summary>Seconds between two BOT commands in one room (spares the server; clients animate anyway).</summary>
         public double BotInterval = 0.25;
 
@@ -191,7 +216,8 @@ namespace FamiconWars.Core
 
         /// <summary>
         /// Lobby actions: "sit" (arg seat), "stand", "bot" (arg seat, level 0-4; host), "map" (text map id; host),
-        /// "host" (arg member id; host), "public" (arg 1/0; host), "start" (host; also right after a match),
+        /// "host" (arg member id; host), "public" (arg 1/0; host), "speed" (arg speed index; host),
+        /// "start" (host; also right after a match), "abort" (host: ends the current match as a draw),
         /// "reset" (host, after the match: drop the finished game).
         /// </summary>
         public void Action(int conn, string action, int arg, string text)
@@ -243,6 +269,15 @@ namespace FamiconWars.Core
                     else room.HostId = to.Id;
                     break;
                 }
+                case "speed":
+                    if (!host) err = "部屋主だけが速度を変えられます";
+                    else room.Speed = Math.Max(0, Math.Min(SpeedCount - 1, arg));
+                    break;
+                case "abort":
+                    if (!host) err = "部屋主だけが対戦を終わらせられます";
+                    else if (!room.Started || room.GameOver) err = "対戦中ではありません";
+                    else { Apply(room, new AbortCommand { Army = Army.Red }, -1); return; }
+                    break;
                 case "public":
                     if (!host) err = "部屋主だけが公開範囲を変えられます";
                     else room.Public = arg != 0;
@@ -272,8 +307,15 @@ namespace FamiconWars.Core
             RulesEngine.StartGame(room.State);
             room.Cmds.Clear(); room.Seeds.Clear();
             for (int s = 0; s < 2; s++)
-                room.Bots[s] = room.Seats[s] == SeatKind.Bot ? new AiPlayer((Army)s, AiProfile.ForLevel(room.BotLevels[s]), nextSeed()) : null;
+            {
+                bool bot = room.Seats[s] == SeatKind.Bot;
+                room.MatchBotLevels[s] = bot ? Math.Max(1, room.BotLevels[s]) : 0;
+                room.BotSeeds[s] = bot ? nextSeed() : 0;
+                room.Bots[s] = null;
+            }
+            room.BotsOnServer = false;
             room.BotNextTime = 0;
+            room.LastActivity = now;
             SendStatus(room);
             foreach (var m in room.Members) if (m.Online) send(m.Conn, Log(room, m.Seat));
         }
@@ -308,9 +350,46 @@ namespace FamiconWars.Core
             var me = room.ByConn(conn);
             if (me.Seat < 0) { send(conn, new Rejected { Error = "観戦中は操作できません" }); return; }
             var cmd = CommandCodec.Decode(text);
-            if (cmd == null) { send(conn, new Rejected { Error = "不正なコマンドです" }); return; }
+            if (cmd == null || cmd is AbortCommand) { send(conn, new Rejected { Error = "不正なコマンドです" }); return; }
             if ((int)cmd.Army != me.Seat) { send(conn, new Rejected { Error = "手番ではありません" }); return; }
             Apply(room, cmd, conn);
+        }
+
+        /// <summary>
+        /// The host's client sends the move of a BOT seat (worked out with AiPlayer.ForOnline). Anything
+        /// else than a legal move of the BOT whose turn it is makes the server take the BOTs over.
+        /// </summary>
+        public void BotPlay(int conn, string text)
+        {
+            if (!byConn.TryGetValue(conn, out var room) || !room.Started || room.GameOver || room.BotsOnServer) return;
+            var me = room.ByConn(conn);
+            if (me == null || me.Id != room.HostId) return;                 // only the current host (a late message from a former one is dropped)
+            int seat = (int)room.State.Active;
+            if (room.MatchBotLevels[seat] == 0) return;
+            var cmd = CommandCodec.Decode(text);
+            if (cmd == null || cmd is AbortCommand || cmd is SurrenderCommand || (int)cmd.Army != seat) { TakeOverBots(room); return; }
+            if (!Apply(room, cmd, -1)) TakeOverBots(room);
+        }
+
+        /// <summary>A client's own copy of the BOT worked out a different move than the one played (index into the log).</summary>
+        public void BotMismatch(int conn, int index)
+        {
+            if (!byConn.TryGetValue(conn, out var room) || !room.Started || room.GameOver || room.BotsOnServer) return;
+            if (index < 0 || index >= room.Cmds.Count) return;
+            var c = CommandCodec.Decode(room.Cmds[index]);
+            if (c == null || room.MatchBotLevels[(int)c.Army] == 0) return;
+            TakeOverBots(room);
+        }
+
+        /// <summary>From now on the server plays the BOT seats of this match.</summary>
+        void TakeOverBots(OnlineRoom room)
+        {
+            if (room.BotsOnServer) return;
+            room.BotsOnServer = true;
+            for (int s = 0; s < 2; s++)
+                room.Bots[s] = room.MatchBotLevels[s] > 0 ? new AiPlayer((Army)s, AiProfile.ForLevel(room.MatchBotLevels[s]), nextSeed()) : null;
+            room.BotNextTime = 0;
+            SendStatus(room);
         }
 
         /// <returns>true when accepted.</returns>
@@ -326,6 +405,7 @@ namespace FamiconWars.Core
             }
             var text = CommandCodec.Encode(cmd);
             room.Cmds.Add(text); room.Seeds.Add(seed);
+            room.LastActivity = now;
             var msg = new Applied { Index = room.Cmds.Count - 1, Cmd = text, Seed = seed, Hash = CommandCodec.Hash(room.State) };
             foreach (var m in room.Members) if (m.Online) send(m.Conn, msg);
             if (room.State.GameOver)
@@ -340,10 +420,19 @@ namespace FamiconWars.Core
         /// <summary>Call regularly (every frame is fine): BOTs make one move per room at a time.</summary>
         public void Tick(double now)
         {
+            this.now = now;
             foreach (var room in rooms.Values)
             {
-                if (!room.Started || room.GameOver || now < room.BotNextTime) continue;
+                if (!room.Started || room.GameOver) continue;
                 int seat = (int)room.State.Active;
+                if (room.MatchBotLevels[seat] == 0) continue;
+                if (!room.BotsOnServer)
+                {
+                    // the host plays the BOT; one that stops sending (closed tab, hidden window) is replaced
+                    if (now - room.LastActivity > BotTimeout) TakeOverBots(room);
+                    continue;
+                }
+                if (now < room.BotNextTime) continue;
                 var bot = room.Bots[seat];
                 if (bot == null) continue;
                 room.BotNextTime = now + BotInterval;
@@ -417,6 +506,7 @@ namespace FamiconWars.Core
                 send(m.Conn, new RoomStatus
                 {
                     Code = room.Code, MapId = room.MapId, Started = room.Started, GameOver = room.GameOver, Public = room.Public,
+                    Speed = room.Speed, BotsOnServer = room.BotsOnServer,
                     MyId = m.Id, MySeat = m.Seat, HostId = room.HostId,
                     SeatKinds = (SeatKind[])room.Seats.Clone(), SeatNames = seatNames, SeatLevels = (int[])room.BotLevels.Clone(), SeatOnline = seatOnline,
                     MemberIds = ids, MemberNames = names, MemberSeats = seats, MemberOnline = online
@@ -425,7 +515,11 @@ namespace FamiconWars.Core
         }
 
         static GameLog Log(OnlineRoom room, int seat) =>
-            new GameLog { MapId = room.PlayedMapId ?? room.MapId, MyArmy = seat < 0 ? -1 : seat, Cmds = room.Cmds.ToArray(), Seeds = room.Seeds.ToArray() };
+            new GameLog
+            {
+                MapId = room.PlayedMapId ?? room.MapId, MyArmy = seat < 0 ? -1 : seat, Cmds = room.Cmds.ToArray(), Seeds = room.Seeds.ToArray(),
+                BotSeeds = (uint[])room.BotSeeds.Clone(), BotLevels = (int[])room.MatchBotLevels.Clone()
+            };
     }
 
     /// <summary>Client side copy of the server's game, rebuilt from the log and kept in step.</summary>
@@ -455,6 +549,9 @@ namespace FamiconWars.Core
             if (r == null || !r.Ok || CommandCodec.Hash(State) != hash) return null;
             return r;
         }
+
+        /// <summary>Applies one command without the order / hash checks (rebuilding a BOT's phase).</summary>
+        public ApplyResult Advance(string text, uint seed) => ApplyRaw(text, seed);
 
         ApplyResult ApplyRaw(string text, uint seed)
         {

@@ -11,7 +11,7 @@ namespace FamiconWars.Game
     /// <summary>Title, map select and pre-match setup screens. Built once; choices update in place (no rebuild, no flicker).</summary>
     public partial class GameHud
     {
-        public event Action OnTitleOnline;
+        public event Action OnTitleOnline, OnSoundSettings;
         public event Action OnTitleStart, OnMapBack, OnMapNext, OnSetupBack, OnSetupStart, OnBackToTitle;
         public event Action<string> OnMapPicked;
 
@@ -22,7 +22,9 @@ namespace FamiconWars.Game
 
         GameSettings editing;
         bool setupRowsBuilt;
-        List<Button> segRed, segBlue, segSpeed, segAnim, segBgm, segBgmVol, segSeVol;
+        List<Button> segRed, segBlue, segSpeed, segAnim, segBgm;
+        Slider setupBgmVol, setupSeVol;
+        TextMeshProUGUI setupBgmVal, setupSeVal;
         static readonly int[] VolumeSteps = { 0, 25, 50, 75, 100 };
         static readonly Color Backdrop = new Color(0.055f, 0.065f, 0.05f, 0.9f);
 
@@ -35,6 +37,8 @@ namespace FamiconWars.Game
             BuildOnline();
             BuildReplay();
             BuildCameraWidget();
+            BuildHowTo();
+            BuildSoundPanel();
         }
 
         public void HideMenus()
@@ -45,6 +49,7 @@ namespace FamiconWars.Game
             HideOnline();
             if (recordsRoot != null) recordsRoot.gameObject.SetActive(false);
             if (replayBar != null) replayBar.gameObject.SetActive(false);
+            if (howRoot != null) howRoot.gameObject.SetActive(false);
         }
 
         void ShowOnly(RectTransform root, Button focus)
@@ -81,7 +86,7 @@ namespace FamiconWars.Game
             Pin(blue, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(608, 46), new Vector2(440, 14), pivot: new Vector2(0, 0.5f));
 
             var sub = Label("Sub", titleRoot, SizeBody, Muted, TextAlignmentOptions.MidlineLeft, false);
-            sub.text = "(仮題)  どちらかの基地が落ちるまで。";
+            sub.text = "どちらかの基地が落ちるまで。";
             Pin(sub.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(160, 0), new Vector2(900, 40), pivot: new Vector2(0, 0.5f));
 
             titleStart = MakeButton("Start", titleRoot, "はじめる", true, () => OnTitleStart?.Invoke());
@@ -91,19 +96,23 @@ namespace FamiconWars.Game
             var online = MakeButton("Online", titleRoot, "オンライン対戦", false, () => OnTitleOnline?.Invoke());
             Pin((RectTransform)online.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(160, -212), new Vector2(340, 64), pivot: new Vector2(0, 0.5f));
 
-            var how = MakeButton("HowTo", titleRoot, "あそびかた", false, () => { });
-            how.interactable = false;
+            var sound = MakeButton("Sound", titleRoot, "サウンド", false, () => OnSoundSettings?.Invoke());
+            Pin((RectTransform)sound.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(160, -452), new Vector2(340, 64), pivot: new Vector2(0, 0.5f));
+            var how = MakeButton("HowTo", titleRoot, "あそびかた", false, () => ShowHowTo());
             Pin((RectTransform)how.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(160, -292), new Vector2(340, 64), pivot: new Vector2(0, 0.5f));
-            WipBadge((RectTransform)how.transform, new Vector2(352, 0), new Vector2(0, 0.5f));
 
             var ver = Label("Version", titleRoot, SizeSmall, Muted, TextAlignmentOptions.BottomRight, false);
-            ver.text = "開発版 v0.1";
+            ver.text = "beta v0.9";
             Pin(ver.rectTransform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-32, 24), new Vector2(400, 30), pivot: new Vector2(1, 0));
 
             titleRoot.gameObject.SetActive(false);
         }
 
         public void ShowTitle() => ShowOnly(titleRoot, titleStart);
+        public bool TitleVisible => titleRoot != null && titleRoot.gameObject.activeSelf;
+        /// <summary>Screens that keep the title music: title, map select, match settings, how to play, match records.</summary>
+        public bool TitleMusicScreen => TitleVisible || (mapRoot != null && mapRoot.gameObject.activeSelf)
+            || (setupRoot != null && setupRoot.gameObject.activeSelf) || HowToVisible || RecordsVisible;
 
         // ================= map select =================
 
@@ -151,9 +160,22 @@ namespace FamiconWars.Game
             var empty = b.transform.Find("Text");
             if (empty != null) empty.gameObject.SetActive(false);
 
-            var marker = Panel("Selected", rt, Brass).GetComponent<Image>();
+            // the chosen card gets a brass frame on all four sides (the left focus bar would double it)
+            var focusBar = b.transform.Find("Focus");
+            if (focusBar != null) Destroy(focusBar.gameObject);
+            var marker = Panel("Selected", rt, new Color(0, 0, 0, 0)).GetComponent<Image>();
             marker.raycastTarget = false;
-            Pin((RectTransform)marker.transform, new Vector2(0, 1), new Vector2(1, 1), Vector2.zero, new Vector2(0, 6), pivot: new Vector2(0.5f, 1), stretchX: true);
+            Fill((RectTransform)marker.transform, 0, 0, 0, 0);
+            foreach (var side in new[] { new Vector4(0, 0, 1, 0), new Vector4(0, 1, 1, 1), new Vector4(0, 0, 0, 1), new Vector4(1, 0, 1, 1) })
+            {
+                var bar = Panel("FrameEdge", (RectTransform)marker.transform, Brass);
+                bar.GetComponent<Image>().raycastTarget = false;
+                bar.anchorMin = new Vector2(side.x, side.y); bar.anchorMax = new Vector2(side.z, side.w);
+                bool horizontal = side.y == side.w;
+                bar.pivot = new Vector2(side.x, side.y);
+                bar.sizeDelta = horizontal ? new Vector2(0, 4) : new Vector2(4, 0);
+                bar.anchoredPosition = Vector2.zero;
+            }
 
             // preview area (left)
             var frame = Panel("PreviewFrame", rt, Plate);
@@ -195,7 +217,7 @@ namespace FamiconWars.Game
             foreach (var c in mapCards)
             {
                 bool on = c.map.Id == id;
-                c.marker.enabled = on;
+                c.marker.gameObject.SetActive(on);
                 if (c.map.Ready) c.name.color = on ? Brass : Paper;
             }
         }
@@ -247,18 +269,16 @@ namespace FamiconWars.Game
 
             var head = RowLabel("サウンド", -460);
             head.color = Paper; head.fontStyle = FontStyles.Bold;
-            WipBadge(setupCard, new Vector2(150, -472), new Vector2(0, 1));
-            var wipNote = Label("SoundNote", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
-            wipNote.text = "音はまだ鳴りません。設定値だけ保存されます。";
-            Pin(wipNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(260, -466), new Vector2(600, 32), pivot: new Vector2(0, 1));
+            var soundNote = Label("SoundNote", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
+            soundNote.text = "変えるとすぐに反映されます(効果音は試しに鳴ります)";
+            Pin(soundNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -466), new Vector2(700, 32), pivot: new Vector2(0, 1));
 
-            string[] vols = { "0", "25", "50", "75", "100" };
             RowLabel("BGM", -512);
-            segBgm = Segment(-512, 56, new[] { "オン", "オフ" }, i => editing.BgmEnabled = i == 0);
+            segBgm = Segment(-512, 56, new[] { "オン", "オフ" }, i => { editing.BgmEnabled = i == 0; GameAudio.Apply(editing); });
             RowLabel("BGM 音量", -580);
-            segBgmVol = Segment(-580, 56, vols, i => editing.BgmVolume = VolumeSteps[i]);
+            setupBgmVol = MakeSlider("BgmVolume", setupCard, new Vector2(240, -580), 780, out setupBgmVal, v => { editing.BgmVolume = v; GameAudio.Apply(editing); }, null);
             RowLabel("効果音 音量", -648);
-            segSeVol = Segment(-648, 56, vols, i => editing.SeVolume = VolumeSteps[i]);
+            setupSeVol = MakeSlider("SeVolume", setupCard, new Vector2(240, -648), 780, out setupSeVal, v => { editing.SeVolume = v; GameAudio.Apply(editing); }, () => GameAudio.Se("capture_done", 1f, 0));
         }
 
         public void ShowSetupScreen(GameSettings s, string mapName)
@@ -271,8 +291,8 @@ namespace FamiconWars.Game
             Select(segSpeed, s.Speed);
             Select(segAnim, s.BattleAnimation ? 0 : 1);
             Select(segBgm, s.BgmEnabled ? 0 : 1);
-            Select(segBgmVol, Array.IndexOf(VolumeSteps, Nearest(s.BgmVolume)));
-            Select(segSeVol, Array.IndexOf(VolumeSteps, Nearest(s.SeVolume)));
+            SetSlider(setupBgmVol, setupBgmVal, s.BgmVolume);
+            SetSlider(setupSeVol, setupSeVal, s.SeVolume);
             ShowOnly(setupRoot, setupStart);
         }
 
