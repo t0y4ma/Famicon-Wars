@@ -117,7 +117,10 @@ namespace FamiconWars.Game
             hud.OnRoomBot += (seat, level) => FwClient.RoomAction("bot", seat, level.ToString());
             hud.OnRoomHost += id => FwClient.RoomAction("host", id);
             hud.OnRoomMap += StepRoomMap;
-            hud.OnRoomStart += () => FwClient.RoomAction(room.HasValue && room.Value.started ? "reset" : "start");
+            hud.OnRoomStart += () => FwClient.RoomAction("start");      // also right after a match (the server drops the finished game)
+            hud.OnRoomPublic += on => FwClient.RoomAction("public", on ? 1 : 0);
+            hud.OnOnlineRefresh += RefreshRoomList;
+            FwClient.RoomList += OnRoomList;
             hud.OnRoomLeave += () => { if (FwClient.IsConnected) FwClient.LeaveRoom(); roomCode = null; room = null; ShowOnlineLobby(); };
             FwClient.Connected += OnNetConnected;
             FwClient.Disconnected += OnNetDisconnected;
@@ -423,6 +426,12 @@ namespace FamiconWars.Game
             var dk = Keyboard.current;
             if (dk != null && dk.f8Key.wasPressedThisFrame && (dk.leftCtrlKey.isPressed || dk.rightCtrlKey.isPressed) && (dk.leftShiftKey.isPressed || dk.rightShiftKey.isPressed))
                 ToggleDebugMode();
+            // the lobby's list of public rooms stays fresh while it is open
+            if (hud.OnlineLobbyVisible && FwClient.IsConnected && pendingLobby == null && Time.unscaledTime >= nextListAt)
+            {
+                nextListAt = Time.unscaledTime + 5f;
+                FwClient.RequestRoomList();
+            }
             if (!InMatch || cam == null) return;
             UpdateCamera();
             // moves from the server are shown one at a time, each after the previous animation
@@ -852,6 +861,34 @@ namespace FamiconWars.Game
             pendingLobby = null;
             hud.ShowOnline(NetConfig.DefaultAddress, roomCode, FwClient.IsConnected ? "接続しています" : "", false, NetConfig.PlayerName);
             if (NetConfig.DebugMode) hud.SetOnlineName(NetConfig.PlayerName);   // each debug window its own name
+            RefreshRoomList();
+        }
+
+        float nextListAt;
+
+        /// <summary>Asks the server for the public rooms (connecting first if needed).</summary>
+        void RefreshRoomList()
+        {
+            nextListAt = Time.unscaledTime + 5f;
+            FwNetworkManager.Create(data);
+            if (FwClient.IsConnected) { FwClient.RequestRoomList(); return; }
+            if (NetworkClientBusy()) { hud.RoomListMessage("サーバーに接続しています…"); return; }
+            hud.RoomListMessage("サーバーに接続しています…");
+            if (!FwClient.Connect(hud.OnlineAddress)) hud.RoomListMessage("サーバーのアドレスの形式が正しくありません");
+        }
+
+        static bool NetworkClientBusy() => Mirror.NetworkClient.active && !Mirror.NetworkClient.isConnected;
+
+        void OnRoomList(RoomListMsg m)
+        {
+            if (!hud.OnlineLobbyVisible) return;
+            var list = new List<RoomListEntry>();
+            for (int i = 0; m.codes != null && i < m.codes.Length; i++)
+            {
+                var e = MapCatalog.Find(m.mapIds[i]);
+                list.Add(new RoomListEntry { Code = m.codes[i], MapName = e != null ? e.Name : m.mapIds[i], Host = m.hostNames[i], State = m.states[i], Members = m.members[i], SeatsTaken = m.seatsTaken[i] });
+            }
+            hud.SetRoomList(list);
         }
 
         void OnlineGo(string address, string action, string code)
@@ -881,7 +918,7 @@ namespace FamiconWars.Game
 
         void SendPending()
         {
-            if (pendingLobby == "create") FwClient.CreateRoom(settings.MapId);
+            if (pendingLobby == "create") FwClient.CreateRoom(settings.MapId, hud.CreatePublic);
             else if (pendingLobby == "join") FwClient.JoinRoom(pendingCode);
             pendingLobby = null;
         }
@@ -893,11 +930,17 @@ namespace FamiconWars.Game
             incoming.Clear();
         }
 
-        void OnNetConnected() => SendPending();
+        void OnNetConnected()
+        {
+            SendPending();
+            if (hud.OnlineLobbyVisible) FwClient.RequestRoomList();
+        }
 
         void OnNetError(string reason)
         {
-            if (hud.OnlineLobbyVisible) { hud.SetOnlineBusy(false); hud.OnlineStatus("通信エラー: " + reason, true); }
+            if (!hud.OnlineLobbyVisible) return;
+            if (pendingLobby != null) { hud.SetOnlineBusy(false); hud.OnlineStatus("通信エラー: " + reason, true); }
+            else hud.RoomListMessage("サーバーに接続できませんでした。「更新」でもう一度試せます");
         }
 
         void OnNetDisconnected()
@@ -916,7 +959,9 @@ namespace FamiconWars.Game
             }
             else if (hud.OnlineLobbyVisible)
             {
-                hud.ShowOnline(null, null, pendingLobby != null ? "サーバーに接続できませんでした" : "切断されました", true);
+                // only the list was being fetched: say so in the list, not as a form error
+                if (pendingLobby != null) hud.ShowOnline(null, null, "サーバーに接続できませんでした", true);
+                hud.RoomListMessage("サーバーに接続できませんでした。「更新」でもう一度試せます");
                 pendingLobby = null;
             }
         }
@@ -945,7 +990,7 @@ namespace FamiconWars.Game
 
         RoomView ToView(RoomStatusMsg m)
         {
-            var v = new RoomView { Code = m.code, MapId = m.mapId, Started = m.started, GameOver = m.gameOver, IAmHost = m.myId == m.hostId, MySeat = m.mySeat };
+            var v = new RoomView { Code = m.code, MapId = m.mapId, Started = m.started, GameOver = m.gameOver, IAmHost = m.myId == m.hostId, MySeat = m.mySeat, IsPublic = m.isPublic };
             for (int s = 0; s < 2; s++)
             {
                 v.SeatKinds[s] = m.seatKinds != null ? (SeatKind)m.seatKinds[s] : SeatKind.Empty;
@@ -1246,6 +1291,7 @@ namespace FamiconWars.Game
             FwClient.Error -= OnNetError;
             FwClient.Status -= OnNetStatus;
             FwClient.Log -= StartOnlineMatch;
+            FwClient.RoomList -= OnRoomList;
             FwClient.Applied -= ApplyRemote;
             FwClient.Rejected -= OnNetRejected;
             FwClient.LobbyError -= OnNetLobbyError;

@@ -13,6 +13,8 @@ namespace FamiconWars.Core
     // A room has two seats (red, blue) and any number of spectators. Before the match the host
     // picks the map, puts BOTs (server-side COM) in empty seats, can hand the host role to someone
     // else, and starts the match once both seats are filled. Spectators watch the match live.
+    // After a match the room can be rearranged right away (seats, map, BOTs) and the next match
+    // started; the finished game stays available until then. Public rooms are listed in the lobby.
     // ------------------------------------------------------------------------------------------
 
     public enum SeatKind { Empty = 0, Human = 1, Bot = 2 }
@@ -23,7 +25,7 @@ namespace FamiconWars.Core
     public sealed class RoomStatus : ServerMsg
     {
         public string Code, MapId;
-        public bool Started, GameOver;
+        public bool Started, GameOver, Public;
         public int MyId, MySeat, HostId;
         public SeatKind[] SeatKinds = new SeatKind[2];
         public string[] SeatNames = new string[2];
@@ -37,6 +39,12 @@ namespace FamiconWars.Core
     public sealed class Rejected : ServerMsg { public string Error; }
     public sealed class LobbyError : ServerMsg { public string Error; }
     public sealed class LeftRoom : ServerMsg { }
+    /// <summary>The public rooms for the lobby. State: 0 waiting, 1 playing, 2 match over.</summary>
+    public sealed class RoomList : ServerMsg
+    {
+        public string[] Codes, MapIds, HostNames;
+        public int[] States, Members, SeatsTaken;
+    }
 
     public sealed class RoomMember
     {
@@ -49,6 +57,10 @@ namespace FamiconWars.Core
     public sealed class OnlineRoom
     {
         public string Code, MapId;
+        /// <summary>Map of the match in State (MapId may already be changed for the next one).</summary>
+        public string PlayedMapId;
+        /// <summary>Listed in the lobby (private rooms are reached by their number only).</summary>
+        public bool Public;
         public GameState State;
         public readonly List<string> Cmds = new List<string>();
         public readonly List<uint> Seeds = new List<uint>();
@@ -60,6 +72,8 @@ namespace FamiconWars.Core
         public double BotNextTime;
         public bool Started => State != null;
         public bool GameOver => State != null && State.GameOver;
+        /// <summary>Seats, map and BOTs can change: before a match or once it is over.</summary>
+        public bool Editable => State == null || State.GameOver;
         public RoomMember ByConn(int conn) => Members.Find(m => m.Conn == conn);
         public RoomMember ById(int id) => Members.Find(m => m.Id == id);
         public RoomMember InSeat(int seat) => Members.Find(m => m.Seat == seat);
@@ -100,14 +114,41 @@ namespace FamiconWars.Core
 
         // ---------------- lobby ----------------
 
-        public void Create(int conn, string token, string name, string mapId)
+        public const int MaxListed = 30;
+
+        /// <summary>Lobby: the public rooms, waiting ones first.</summary>
+        public void List(int conn)
+        {
+            var list = new List<OnlineRoom>();
+            foreach (var r in rooms.Values) if (r.Public) list.Add(r);
+            list.Sort((a, b) =>
+            {
+                int sa = a.Editable ? 0 : 1, sb = b.Editable ? 0 : 1;
+                return sa != sb ? sa - sb : string.CompareOrdinal(a.Code, b.Code);
+            });
+            if (list.Count > MaxListed) list.RemoveRange(MaxListed, list.Count - MaxListed);
+            int n = list.Count;
+            var msg = new RoomList { Codes = new string[n], MapIds = new string[n], HostNames = new string[n], States = new int[n], Members = new int[n], SeatsTaken = new int[n] };
+            for (int i = 0; i < n; i++)
+            {
+                var r = list[i];
+                msg.Codes[i] = r.Code; msg.MapIds[i] = r.MapId;
+                msg.HostNames[i] = r.ById(r.HostId)?.Name ?? "";
+                msg.States[i] = !r.Started ? 0 : r.GameOver ? 2 : 1;
+                msg.Members[i] = r.Members.FindAll(m => m.Online).Count;
+                msg.SeatsTaken[i] = (r.Seats[0] != SeatKind.Empty ? 1 : 0) + (r.Seats[1] != SeatKind.Empty ? 1 : 0);
+            }
+            send(conn, msg);
+        }
+
+        public void Create(int conn, string token, string name, string mapId, bool isPublic = false)
         {
             if (BadToken(token)) { send(conn, new LobbyError { Error = "接続情報が不正です" }); return; }
             Leave(conn, false);
             if (loadMap(mapId) == null) mapId = "map01";
             string code;
             do code = codes.Next(1000, 10000).ToString(); while (rooms.ContainsKey(code));
-            var room = new OnlineRoom { Code = code, MapId = mapId };
+            var room = new OnlineRoom { Code = code, MapId = mapId, Public = isPublic };
             var m = new RoomMember { Id = room.NextMemberId++, Conn = conn, Token = token, Name = CleanName(name), Seat = 0 };
             room.Members.Add(m);
             room.Seats[0] = SeatKind.Human;
@@ -140,17 +181,18 @@ namespace FamiconWars.Core
             if (room.Members.Count >= MaxMembers) { send(conn, new LobbyError { Error = "この部屋は満員です" }); return; }
             var m = new RoomMember { Id = room.NextMemberId++, Conn = conn, Token = token, Name = CleanName(name), Seat = -1 };
             room.Members.Add(m); byConn[conn] = room;
-            // before the match a newcomer takes the free seat if there is one; otherwise (and mid-game) they watch
-            if (!room.Started)
+            // between matches a newcomer takes the free seat if there is one; otherwise (and mid-game) they watch
+            if (room.Editable)
                 for (int s = 0; s < 2; s++)
                     if (room.Seats[s] == SeatKind.Empty) { room.Seats[s] = SeatKind.Human; m.Seat = s; break; }
             SendStatus(room);
-            if (room.Started) send(conn, Log(room, -1));
+            if (room.Started && !room.GameOver) send(conn, Log(room, -1));
         }
 
         /// <summary>
         /// Lobby actions: "sit" (arg seat), "stand", "bot" (arg seat, level 0-4; host), "map" (text map id; host),
-        /// "host" (arg member id; host), "start" (host), "reset" (host, after the match: back to the room).
+        /// "host" (arg member id; host), "public" (arg 1/0; host), "start" (host; also right after a match),
+        /// "reset" (host, after the match: drop the finished game).
         /// </summary>
         public void Action(int conn, string action, int arg, string text)
         {
@@ -161,7 +203,7 @@ namespace FamiconWars.Core
             switch (action)
             {
                 case "sit":
-                    if (room.Started) err = "対戦中は席を移れません";
+                    if (!room.Editable) err = "対戦中は席を移れません";
                     else if (arg < 0 || arg > 1) err = "席がありません";
                     else if (me.Seat == arg) { }
                     else if (room.Seats[arg] != SeatKind.Empty) err = "その席は埋まっています";
@@ -172,12 +214,12 @@ namespace FamiconWars.Core
                     }
                     break;
                 case "stand":
-                    if (room.Started) err = "対戦中は席を立てません";
+                    if (!room.Editable) err = "対戦中は席を立てません";
                     else if (me.Seat >= 0) { room.Seats[me.Seat] = SeatKind.Empty; me.Seat = -1; }
                     break;
                 case "bot":
                     if (!host) err = "部屋主だけが BOT を置けます";
-                    else if (room.Started) err = "対戦中は変更できません";
+                    else if (!room.Editable) err = "対戦中は変更できません";
                     else if (arg < 0 || arg > 1) err = "席がありません";
                     else if (room.Seats[arg] == SeatKind.Human) err = "その席には人が座っています";
                     else
@@ -189,7 +231,7 @@ namespace FamiconWars.Core
                     break;
                 case "map":
                     if (!host) err = "部屋主だけがマップを選べます";
-                    else if (room.Started) err = "対戦中は変更できません";
+                    else if (!room.Editable) err = "対戦中は変更できません";
                     else if (loadMap(text) == null) err = "そのマップは使えません";
                     else room.MapId = text;
                     break;
@@ -201,11 +243,15 @@ namespace FamiconWars.Core
                     else room.HostId = to.Id;
                     break;
                 }
+                case "public":
+                    if (!host) err = "部屋主だけが公開範囲を変えられます";
+                    else room.Public = arg != 0;
+                    break;
                 case "start":
                     if (!host) err = "部屋主だけが開始できます";
-                    else if (room.Started) err = "もう始まっています";
+                    else if (!room.Editable) err = "もう始まっています";
                     else if (room.Seats[0] == SeatKind.Empty || room.Seats[1] == SeatKind.Empty) err = "両方の席が埋まると開始できます";
-                    else StartMatch(room);
+                    else { if (room.Started) DropFinished(room); StartMatch(room); }
                     break;
                 case "reset":
                     if (!host) err = "部屋主だけが部屋に戻せます";
@@ -221,6 +267,7 @@ namespace FamiconWars.Core
 
         void StartMatch(OnlineRoom room)
         {
+            room.PlayedMapId = room.MapId;
             room.State = GameState.Create(data, loadMap(room.MapId), nextSeed());
             RulesEngine.StartGame(room.State);
             room.Cmds.Clear(); room.Seeds.Clear();
@@ -233,12 +280,17 @@ namespace FamiconWars.Core
 
         void ResetRoom(OnlineRoom room)
         {
+            DropFinished(room);
+            SendStatus(room);
+        }
+
+        /// <summary>Forgets the finished game (members who are gone already lost their seat when it ended).</summary>
+        void DropFinished(OnlineRoom room)
+        {
             room.State = null;
             room.Cmds.Clear(); room.Seeds.Clear();
             room.Bots[0] = room.Bots[1] = null;
-            // members who are gone lose their seat now that the match is over
             room.Members.RemoveAll(m => !m.Online && Unseat(room, m));
-            SendStatus(room);
         }
 
         static bool Unseat(OnlineRoom room, RoomMember m)
@@ -276,7 +328,12 @@ namespace FamiconWars.Core
             room.Cmds.Add(text); room.Seeds.Add(seed);
             var msg = new Applied { Index = room.Cmds.Count - 1, Cmd = text, Seed = seed, Hash = CommandCodec.Hash(room.State) };
             foreach (var m in room.Members) if (m.Online) send(m.Conn, msg);
-            if (room.State.GameOver) SendStatus(room);
+            if (room.State.GameOver)
+            {
+                // the room can be rearranged now: members who are gone give up their seat
+                room.Members.RemoveAll(m => !m.Online && Unseat(room, m));
+                SendStatus(room);
+            }
             return true;
         }
 
@@ -359,7 +416,7 @@ namespace FamiconWars.Core
                 if (!m.Online) continue;
                 send(m.Conn, new RoomStatus
                 {
-                    Code = room.Code, MapId = room.MapId, Started = room.Started, GameOver = room.GameOver,
+                    Code = room.Code, MapId = room.MapId, Started = room.Started, GameOver = room.GameOver, Public = room.Public,
                     MyId = m.Id, MySeat = m.Seat, HostId = room.HostId,
                     SeatKinds = (SeatKind[])room.Seats.Clone(), SeatNames = seatNames, SeatLevels = (int[])room.BotLevels.Clone(), SeatOnline = seatOnline,
                     MemberIds = ids, MemberNames = names, MemberSeats = seats, MemberOnline = online
@@ -368,7 +425,7 @@ namespace FamiconWars.Core
         }
 
         static GameLog Log(OnlineRoom room, int seat) =>
-            new GameLog { MapId = room.MapId, MyArmy = seat < 0 ? -1 : seat, Cmds = room.Cmds.ToArray(), Seeds = room.Seeds.ToArray() };
+            new GameLog { MapId = room.PlayedMapId ?? room.MapId, MyArmy = seat < 0 ? -1 : seat, Cmds = room.Cmds.ToArray(), Seeds = room.Seeds.ToArray() };
     }
 
     /// <summary>Client side copy of the server's game, rebuilt from the log and kept in step.</summary>

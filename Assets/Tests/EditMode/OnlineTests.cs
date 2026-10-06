@@ -213,6 +213,88 @@ namespace FamiconWars.Tests
         }
 
         [Test]
+        public void AfterTheMatchTheRoomCanBeRearrangedAndTheNextMatchStarted()
+        {
+            var code = StartMatch();
+            var room = server.Find(code);
+            server.Play(2, CommandCodec.Encode(new SurrenderCommand { Army = Army.Blue }));
+            Assert.IsTrue(room.GameOver);
+            Assert.IsTrue(Last<RoomStatus>(1).GameOver);
+
+            // seats, map and BOTs can change without "reset" first
+            server.Action(2, "stand", 0, null);
+            Assert.AreEqual(-1, Last<RoomStatus>(2).MySeat);
+            server.Action(1, "sit", 1, null);
+            Assert.AreEqual(1, Last<RoomStatus>(1).MySeat);
+            server.Action(1, "map", 0, "map05");
+            Assert.AreEqual("map05", Last<RoomStatus>(1).MapId);
+            server.Action(1, "bot", 0, "2");
+            Assert.AreEqual(SeatKind.Bot, Last<RoomStatus>(1).SeatKinds[0]);
+            Assert.IsNull(Last<LobbyError>(1));
+            Assert.IsNull(Last<LobbyError>(2));
+
+            // the finished game still rebuilds on its own map until the next match starts
+            Assert.AreEqual("map01", room.PlayedMapId);
+
+            int logs = Box(2).OfType<GameLog>().Count();
+            server.Action(1, "start", 0, null);
+            Assert.IsTrue(room.Started && !room.GameOver);
+            Assert.AreEqual("map05", Last<GameLog>(1).MapId);
+            Assert.AreEqual(1, Last<GameLog>(1).MyArmy);
+            Assert.AreEqual(logs + 1, Box(2).OfType<GameLog>().Count());
+            Assert.AreEqual(-1, Last<GameLog>(2).MyArmy);
+            Assert.AreEqual(0, Last<GameLog>(1).Cmds.Length);
+        }
+
+        [Test]
+        public void AfterTheMatchANewcomerTakesAFreeSeatAndGoneMembersLoseTheirs()
+        {
+            var code = StartMatch();
+            server.Disconnected(2);                                   // blue drops out mid-game: place kept
+            Assert.AreEqual(SeatKind.Human, Last<RoomStatus>(1).SeatKinds[1]);
+            server.Play(1, CommandCodec.Encode(new SurrenderCommand { Army = Army.Red }));
+            var st = Last<RoomStatus>(1);
+            Assert.IsTrue(st.GameOver);
+            Assert.AreEqual(SeatKind.Empty, st.SeatKinds[1], "gone player gives the seat up when the match ends");
+            int logs = Box(3).OfType<GameLog>().Count();
+            server.Join(3, code, "tokC", "Cさん");
+            Assert.AreEqual(1, Last<RoomStatus>(3).MySeat);
+            Assert.AreEqual(logs, Box(3).OfType<GameLog>().Count(), "no finished game is pushed onto a newcomer");
+        }
+
+        [Test]
+        public void PublicRoomsAreListedPrivateOnesAreNot()
+        {
+            server.Create(1, "tokA", "Aさん", "map01", true);
+            var pub = Last<RoomStatus>(1);
+            Assert.IsTrue(pub.Public);
+            server.Create(2, "tokB", "Bさん", "map05", false);
+            var priv = Last<RoomStatus>(2).Code;
+            server.List(9);
+            var list = Last<RoomList>(9);
+            Assert.AreEqual(1, list.Codes.Length);
+            Assert.AreEqual(pub.Code, list.Codes[0]);
+            Assert.AreEqual("Aさん", list.HostNames[0]);
+            Assert.AreEqual(0, list.States[0]);
+            Assert.AreEqual(1, list.Members[0]);
+            Assert.AreEqual(1, list.SeatsTaken[0]);
+
+            // only the host switches it; the change shows in the list
+            server.Join(3, priv, "tokC", "Cさん");
+            server.Action(3, "public", 1, null);
+            Assert.IsNotNull(Last<LobbyError>(3));
+            server.Action(2, "public", 1, null);
+            Assert.IsTrue(Last<RoomStatus>(2).Public);
+            server.Action(1, "public", 0, null);
+            server.List(9);
+            list = Last<RoomList>(9);
+            Assert.AreEqual(1, list.Codes.Length);
+            Assert.AreEqual(priv, list.Codes[0]);
+            Assert.AreEqual(2, list.Members[0]);
+            Assert.AreEqual(2, list.SeatsTaken[0]);
+        }
+
+        [Test]
         public void RoomDisappearsWhenEveryoneIsGone()
         {
             var code = StartMatch();

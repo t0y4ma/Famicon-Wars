@@ -10,17 +10,24 @@ namespace FamiconWars.Net
 {
     // ---------------- wire messages (thin mirrors of the Core protocol) ----------------
 
-    public struct CreateRoomMsg : NetworkMessage { public int version; public string token; public string name; public string mapId; }
+    public struct CreateRoomMsg : NetworkMessage { public int version; public string token; public string name; public string mapId; public bool isPublic; }
+    /// <summary>Lobby: asks for the public rooms (answered with RoomListMsg).</summary>
+    public struct RoomListRequestMsg : NetworkMessage { public int version; }
+    public struct RoomListMsg : NetworkMessage
+    {
+        public string[] codes, mapIds, hostNames;
+        public int[] states, members, seatsTaken;     // state: 0 waiting, 1 playing, 2 match over
+    }
     public struct JoinRoomMsg : NetworkMessage { public int version; public string code; public string token; public string name; }
     public struct LeaveRoomMsg : NetworkMessage { }
-    /// <summary>Room screen actions: sit / stand / bot / map / host / start / reset (see OnlineRoomServer.Action).</summary>
+    /// <summary>Room screen actions: sit / stand / bot / map / host / public / start / reset (see OnlineRoomServer.Action).</summary>
     public struct RoomActionMsg : NetworkMessage { public string action; public int arg; public string text; }
     public struct PlayMsg : NetworkMessage { public string cmd; }
     public struct ResyncMsg : NetworkMessage { }
 
     public struct RoomStatusMsg : NetworkMessage
     {
-        public string code; public string mapId; public bool started, gameOver;
+        public string code; public string mapId; public bool started, gameOver, isPublic;
         public int myId, mySeat, hostId;
         public int[] seatKinds; public string[] seatNames; public int[] seatLevels; public bool[] seatOnline;
         public int[] memberIds; public string[] memberNames; public int[] memberSeats; public bool[] memberOnline;
@@ -38,7 +45,7 @@ namespace FamiconWars.Net
     public static class NetConfig
     {
         /// <summary>Bump whenever messages or rules change: client and server must match.</summary>
-        public const int ProtocolVersion = 2;
+        public const int ProtocolVersion = 3;
         public static ushort ServerPort = 7782;
         public const string PublicUrl = "wss://nine.freeddns.org/fw";
         public const string TokenKey = "fw.clientToken";
@@ -179,7 +186,8 @@ namespace FamiconWars.Net
                 return BitConverter.ToUInt32(b, 0) | 1u;
             }
             rooms = new OnlineRoomServer(data, LoadMap, SendTo, Seed, Environment.TickCount);
-            NetworkServer.RegisterHandler<CreateRoomMsg>((c, m) => { if (VersionOk(c, m.version)) rooms.Create(c.connectionId, m.token, m.name, m.mapId); }, false);
+            NetworkServer.RegisterHandler<CreateRoomMsg>((c, m) => { if (VersionOk(c, m.version)) rooms.Create(c.connectionId, m.token, m.name, m.mapId, m.isPublic); }, false);
+            NetworkServer.RegisterHandler<RoomListRequestMsg>((c, m) => { if (VersionOk(c, m.version)) rooms.List(c.connectionId); }, false);
             NetworkServer.RegisterHandler<JoinRoomMsg>((c, m) => { if (VersionOk(c, m.version)) rooms.Join(c.connectionId, m.code, m.token, m.name); }, false);
             NetworkServer.RegisterHandler<LeaveRoomMsg>((c, m) => rooms.Leave(c.connectionId, true), false);
             NetworkServer.RegisterHandler<RoomActionMsg>((c, m) => rooms.Action(c.connectionId, m.action, m.arg, m.text), false);
@@ -223,7 +231,7 @@ namespace FamiconWars.Net
                 case RoomStatus s:
                     c.Send(new RoomStatusMsg
                     {
-                        code = s.Code, mapId = s.MapId, started = s.Started, gameOver = s.GameOver,
+                        code = s.Code, mapId = s.MapId, started = s.Started, gameOver = s.GameOver, isPublic = s.Public,
                         myId = s.MyId, mySeat = s.MySeat, hostId = s.HostId,
                         seatKinds = new[] { (int)s.SeatKinds[0], (int)s.SeatKinds[1] }, seatNames = s.SeatNames, seatLevels = s.SeatLevels, seatOnline = s.SeatOnline,
                         memberIds = s.MemberIds, memberNames = s.MemberNames, memberSeats = s.MemberSeats, memberOnline = s.MemberOnline
@@ -234,6 +242,7 @@ namespace FamiconWars.Net
                 case Rejected r: c.Send(new RejectedMsg { error = r.Error }); break;
                 case LobbyError e: c.Send(new LobbyErrorMsg { error = e.Error }); break;
                 case LeftRoom _: c.Send(new LeftRoomMsg()); break;
+                case RoomList l: c.Send(new RoomListMsg { codes = l.Codes, mapIds = l.MapIds, hostNames = l.HostNames, states = l.States, members = l.Members, seatsTaken = l.SeatsTaken }); break;
             }
         }
 
@@ -248,6 +257,7 @@ namespace FamiconWars.Net
             NetworkClient.RegisterHandler<RejectedMsg>(m => FwClient.Raise(m), false);
             NetworkClient.RegisterHandler<LobbyErrorMsg>(m => FwClient.Raise(m), false);
             NetworkClient.RegisterHandler<LeftRoomMsg>(m => FwClient.Raise(m), false);
+            NetworkClient.RegisterHandler<RoomListMsg>(m => FwClient.Raise(m), false);
         }
 
         public override void OnClientConnect()
@@ -287,6 +297,7 @@ namespace FamiconWars.Net
         public static event Action<GameLogMsg> Log;
         public static event Action<AppliedMsg> Applied;
         public static event Action Left;
+        public static event Action<RoomListMsg> RoomList;
 
         public static bool IsConnected => NetworkClient.isConnected;
 
@@ -304,7 +315,8 @@ namespace FamiconWars.Net
 
         public static void Disconnect() { if (NetworkClient.active) FwNetworkManager.Instance.StopClient(); }
 
-        public static void CreateRoom(string mapId) => NetworkClient.Send(new CreateRoomMsg { version = NetConfig.ProtocolVersion, token = NetConfig.ClientToken, name = NetConfig.PlayerName, mapId = mapId });
+        public static void CreateRoom(string mapId, bool isPublic) => NetworkClient.Send(new CreateRoomMsg { version = NetConfig.ProtocolVersion, token = NetConfig.ClientToken, name = NetConfig.PlayerName, mapId = mapId, isPublic = isPublic });
+        public static void RequestRoomList() => NetworkClient.Send(new RoomListRequestMsg { version = NetConfig.ProtocolVersion });
         public static void JoinRoom(string code) => NetworkClient.Send(new JoinRoomMsg { version = NetConfig.ProtocolVersion, code = code, token = NetConfig.ClientToken, name = NetConfig.PlayerName });
         public static void LeaveRoom() => NetworkClient.Send(new LeaveRoomMsg());
         public static void RoomAction(string action, int arg = 0, string text = null) => NetworkClient.Send(new RoomActionMsg { action = action, arg = arg, text = text ?? "" });
@@ -317,6 +329,7 @@ namespace FamiconWars.Net
         internal static void Raise(RejectedMsg m) => Rejected?.Invoke(m.error);
         internal static void Raise(LobbyErrorMsg m) => LobbyError?.Invoke(m.error);
         internal static void Raise(LeftRoomMsg m) => Left?.Invoke();
+        internal static void Raise(RoomListMsg m) => RoomList?.Invoke(m);
         internal static void RaiseConnected() => Connected?.Invoke();
         internal static void RaiseDisconnected() => Disconnected?.Invoke();
         internal static void RaiseError(string r) => Error?.Invoke(r);

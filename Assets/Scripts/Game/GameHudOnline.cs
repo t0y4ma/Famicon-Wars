@@ -12,7 +12,9 @@ namespace FamiconWars.Game
     public sealed class RoomView
     {
         public string Code, MapId;
-        public bool Started, GameOver, IAmHost;
+        public bool Started, GameOver, IAmHost, IsPublic;
+        /// <summary>Seats, map and BOTs can change: before a match or once it is over.</summary>
+        public bool Editable => !Started || GameOver;
         public int MySeat;                        // 0 red, 1 blue, -1 watching
         public SeatKind[] SeatKinds = new SeatKind[2];
         public string[] SeatNames = new string[2];
@@ -21,8 +23,15 @@ namespace FamiconWars.Game
         public readonly List<(int id, string name, int seat, bool online, bool host, bool me)> Members = new List<(int, string, int, bool, bool, bool)>();
     }
 
+    /// <summary>One public room in the lobby list. State: 0 waiting, 1 playing, 2 match over.</summary>
+    public struct RoomListEntry
+    {
+        public string Code, MapName, Host;
+        public int State, Members, SeatsTaken;
+    }
+
     /// <summary>
-    /// Online lobby (server, name, create / join) and the room screen: two seats and the members
+    /// Online lobby (server, name, create / join, the list of public rooms) and the room screen: two seats and the members
     /// watching. The host picks the map, puts BOTs in empty seats, can hand the host role over and
     /// starts the match. Everyone can take a free seat or stand up to watch.
     /// </summary>
@@ -30,7 +39,8 @@ namespace FamiconWars.Game
     {
         public event Action<string> OnOnlineCreate;          // address
         public event Action<string, string> OnOnlineJoin;    // address, code
-        public event Action OnOnlineBack;
+        public event Action OnOnlineBack, OnOnlineRefresh;
+        public event Action<bool> OnRoomPublic;
         public event Action<int> OnRoomSit, OnRoomHost, OnRoomMap;   // seat / member id / map step (-1, +1)
         public event Action<int, int> OnRoomBot;             // seat, level 0-4
         public event Action OnRoomStand, OnRoomStart, OnRoomLeave;
@@ -38,7 +48,10 @@ namespace FamiconWars.Game
         RectTransform onlineRoot, onlineForm, roomRoot, roomBody;
         TMP_InputField addressInput, codeInput, nameInput;
         TextMeshProUGUI onlineStatus, roomStatus;
-        Button onlineCreate, onlineJoin;
+        Button onlineCreate, onlineJoin, createPublicBtn, createPrivateBtn, roomPublicBtn;
+        bool createPublic = true;
+        RectTransform listPanel, listRows;
+        TextMeshProUGUI listMessage;
         Func<string, Texture2D> roomPreview;
         RoomView lastRoomView;
         int botMenuSeat = -1;                       // seat whose BOT strength list is open (-1 = none)
@@ -57,7 +70,7 @@ namespace FamiconWars.Game
 
             // ---- form ----
             onlineForm = Panel("Form", onlineRoot, Plate);
-            Pin(onlineForm, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0, -10), new Vector2(880, 620));
+            Pin(onlineForm, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(96, -10), new Vector2(880, 620), pivot: new Vector2(0, 0.5f));
             Edge(onlineForm, Brass);
 
             FormLabel("サーバー", -40);
@@ -72,9 +85,15 @@ namespace FamiconWars.Game
             var create = MakeButton("Create", onlineForm, "部屋を作る", true, () => OnOnlineCreate?.Invoke(addressInput.text));
             onlineCreate = create;
             Pin((RectTransform)create.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(220, -196), new Vector2(620, 64), pivot: new Vector2(0, 1));
-            var createNote = Label("CreateNote", onlineForm, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
-            createNote.text = "作った人が部屋主です。マップや BOT は部屋の中で決めます";
-            Pin(createNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(220, -268), new Vector2(620, 30), pivot: new Vector2(0, 1));
+            // public (listed in the lobby) or private (number only)
+            createPublicBtn = MakeButton("Public", onlineForm, "公開", true, () => SetCreatePublic(true));
+            Pin((RectTransform)createPublicBtn.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(220, -270), new Vector2(130, 40), pivot: new Vector2(0, 1));
+            createPrivateBtn = MakeButton("Private", onlineForm, "非公開", false, () => SetCreatePublic(false));
+            Pin((RectTransform)createPrivateBtn.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(358, -270), new Vector2(130, 40), pivot: new Vector2(0, 1));
+            var createNote = Label("CreateNote", onlineForm, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
+            createNote.text = "公開: 右の一覧に出ます／非公開: 番号を知る人だけ";
+            createNote.textWrappingMode = TextWrappingModes.Normal;
+            Pin(createNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(504, -266), new Vector2(340, 48), pivot: new Vector2(0, 1));
 
             var divider = Panel("Divider", onlineForm, PlateEdge);
             Pin(divider, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -318), new Vector2(-80, 2), pivot: new Vector2(0.5f, 1), stretchX: true);
@@ -94,6 +113,8 @@ namespace FamiconWars.Game
             onlineStatus.textWrappingMode = TextWrappingModes.Normal;
             Pin(onlineStatus.rectTransform, new Vector2(0, 0), new Vector2(1, 0), new Vector2(0, 36), new Vector2(-80, 70), pivot: new Vector2(0.5f, 0), stretchX: true);
 
+            BuildRoomList();
+
             var back = MakeButton("Back", onlineRoot, "戻る", false, () => OnOnlineBack?.Invoke());
             Pin((RectTransform)back.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(96, 56), new Vector2(200, 64), pivot: new Vector2(0, 0));
 
@@ -109,6 +130,81 @@ namespace FamiconWars.Game
 
             onlineRoot.gameObject.SetActive(false);
             roomRoot.gameObject.SetActive(false);
+        }
+
+        // ---- public rooms (right side of the lobby) ----
+        const int ListRows = 8;
+
+        void BuildRoomList()
+        {
+            listPanel = Panel("RoomList", onlineRoot, Plate);
+            Pin(listPanel, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-96, -10), new Vector2(800, 620), pivot: new Vector2(1, 0.5f));
+            Edge(listPanel, PlateEdge);
+            var title = Label("Title", listPanel, SizeBody, Paper, TextAlignmentOptions.MidlineLeft, true);
+            title.text = "公開されている部屋";
+            Pin(title.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(32, -20), new Vector2(500, 44), pivot: new Vector2(0, 1));
+            var refresh = MakeButton("Refresh", listPanel, "更新", false, () => OnOnlineRefresh?.Invoke());
+            Pin((RectTransform)refresh.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -18), new Vector2(120, 46), pivot: new Vector2(1, 1));
+            listRows = new GameObject("Rows", typeof(RectTransform)).GetComponent<RectTransform>();
+            listRows.SetParent(listPanel, false);
+            Pin(listRows, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -80), new Vector2(-48, ListRows * 66), pivot: new Vector2(0.5f, 1), stretchX: true);
+            listMessage = Label("Message", listPanel, SizeBody, Muted, TextAlignmentOptions.Center, false);
+            listMessage.textWrappingMode = TextWrappingModes.Normal;
+            Pin(listMessage.rectTransform, new Vector2(0, 0.5f), new Vector2(1, 0.5f), new Vector2(0, -20), new Vector2(-80, 120), pivot: new Vector2(0.5f, 0.5f), stretchX: true);
+            listMessage.text = "サーバーに接続しています…";
+        }
+
+        void SetCreatePublic(bool on)
+        {
+            createPublic = on;
+            StyleButton(createPublicBtn, on);
+            StyleButton(createPrivateBtn, !on);
+        }
+
+        /// <summary>Whether a room made from the lobby is listed.</summary>
+        public bool CreatePublic => createPublic;
+
+        /// <summary>The server address typed in the lobby form.</summary>
+        public string OnlineAddress => addressInput != null ? addressInput.text : "";
+
+        /// <summary>Shows a message in place of the list (not connected, loading, ...).</summary>
+        public void RoomListMessage(string text)
+        {
+            if (listRows == null) return;
+            ClearChildren(listRows);
+            listMessage.text = text ?? "";
+        }
+
+        static readonly string[] ListStates = { "<color=#9FD18B>待機中</color>", "<color=#FF8A7E>対戦中</color>", "<color=#D8A23A>対戦終了</color>" };
+
+        /// <summary>The public rooms: waiting ones can be joined, playing ones watched.</summary>
+        public void SetRoomList(List<RoomListEntry> rooms)
+        {
+            if (listRows == null) return;
+            ClearChildren(listRows);
+            listMessage.text = rooms.Count == 0 ? "公開されている部屋はまだありません。\n部屋を作ると、ここに表示されます" : "";
+            for (int i = 0; i < rooms.Count && i < ListRows; i++)
+            {
+                var e = rooms[i];
+                var row = Panel("Row" + i, listRows, new Color(0.09f, 0.11f, 0.085f, 1f));
+                Pin(row, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -i * 66), new Vector2(0, 58), pivot: new Vector2(0.5f, 1), stretchX: true);
+                row.GetComponent<Image>().raycastTarget = false;
+                var code = Label("Code", row, SizeBody, Brass, TextAlignmentOptions.MidlineLeft, true);
+                code.text = e.Code; code.characterSpacing = 6;
+                Pin(code.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(18, 0), new Vector2(100, 50), pivot: new Vector2(0, 0.5f));
+                var name = Label("Map", row, SizeSmall, Paper, TextAlignmentOptions.TopLeft, true);
+                name.text = e.MapName;
+                Pin(name.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(124, -5), new Vector2(480, 26), pivot: new Vector2(0, 1));
+                var info = Label("Info", row, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
+                info.richText = true;
+                info.text = ListStates[Mathf.Clamp(e.State, 0, 2)] + "　席 " + e.SeatsTaken + "/2　" + e.Members + "人　部屋主 " + e.Host;
+                Pin(info.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(124, -30), new Vector2(480, 26), pivot: new Vector2(0, 1));
+                string c = e.Code;
+                bool watch = e.State == 1;
+                var go = MakeButton("Go", row, watch ? "観戦" : "入る", !watch, () => OnOnlineJoin?.Invoke(addressInput.text, c));
+                Pin((RectTransform)go.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-10, 0), new Vector2(130, 46), pivot: new Vector2(1, 0.5f));
+            }
+            SettleButtons(listRows);
         }
 
         void FormLabel(string text, float y)
@@ -214,7 +310,9 @@ namespace FamiconWars.Game
             roomCodeLabel.characterSpacing = 12; roomCodeLabel.overflowMode = TextOverflowModes.Overflow;
             Pin(roomCodeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(210, -28), new Vector2(320, 84), pivot: new Vector2(0, 1));
             roomInvite = Label("Invite", roomBody, SizeBody, Muted, TextAlignmentOptions.MidlineLeft, false);
-            Pin(roomInvite.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(520, -48), new Vector2(900, 44), pivot: new Vector2(0, 1));
+            Pin(roomInvite.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(520, -48), new Vector2(860, 44), pivot: new Vector2(0, 1));
+            roomPublicBtn = MakeButton("Visibility", roomBody, "公開", false, () => OnRoomPublic?.Invoke(lastRoomView == null || !lastRoomView.IsPublic));
+            Pin((RectTransform)roomPublicBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-96, -44), new Vector2(400, 52), pivot: new Vector2(1, 1));
 
             // map
             var mapPlate = Panel("Map", roomBody, Plate);
@@ -321,7 +419,7 @@ namespace FamiconWars.Game
         {
             roomPreview = preview;
             lastRoomView = v;
-            if (botMenuSeat >= 0 && (!v.IAmHost || v.Started || v.SeatKinds[botMenuSeat] == SeatKind.Human)) botMenuSeat = -1;
+            if (botMenuSeat >= 0 && (!v.IAmHost || !v.Editable || v.SeatKinds[botMenuSeat] == SeatKind.Human)) botMenuSeat = -1;
             onlineRoot.gameObject.SetActive(false);
             bool first = !RoomVisible;
             if (first) ShowOnly(roomRoot, null);
@@ -329,7 +427,9 @@ namespace FamiconWars.Game
             roomStatus.text = "";
 
             SetText(roomCodeLabel, v.Code);
-            SetText(roomInvite, v.Started ? (v.GameOver ? "対戦は終わりました" : "対戦中です。この番号で入ると観戦できます") : "この番号を伝えると、相手や観戦者が入れます");
+            SetText(roomInvite, v.Started ? (v.GameOver ? "対戦は終わりました。席とマップを決め直して次の対戦ができます" : "対戦中です。この番号で入ると観戦できます") : "この番号を伝えると、相手や観戦者が入れます");
+            SetText(roomPublicBtn.GetComponentInChildren<TextMeshProUGUI>(), (v.IsPublic ? "公開中(一覧に表示)" : "非公開(番号を知る人だけ)") + (v.IAmHost ? "  切替" : ""));
+            if (roomPublicBtn.interactable != v.IAmHost) roomPublicBtn.interactable = v.IAmHost;
 
             // map
             var entry = MapCatalog.Find(v.MapId);
@@ -343,8 +443,8 @@ namespace FamiconWars.Game
                 roomMapPreview.rectTransform.sizeDelta = aspect >= 300f / 180f ? new Vector2(300, 300 / aspect) : new Vector2(180 * aspect, 180);
             }
             SetText(roomMapNote, entry != null ? entry.Width + " × " + entry.Height + "\n" + entry.Note : "");
-            SetActive(roomMapPrev, v.IAmHost && !v.Started);
-            SetActive(roomMapNext, v.IAmHost && !v.Started);
+            SetActive(roomMapPrev, v.IAmHost && v.Editable);
+            SetActive(roomMapNext, v.IAmHost && v.Editable);
 
             for (int s = 0; s < 2; s++) UpdateSeat(v, s);
 
@@ -364,14 +464,14 @@ namespace FamiconWars.Game
             }
 
             // footer
-            SetActive(roomStand, !v.Started && v.MySeat >= 0);
+            SetActive(roomStand, v.Editable && v.MySeat >= 0);
             bool ready = v.SeatKinds[0] != SeatKind.Empty && v.SeatKinds[1] != SeatKind.Empty;
-            bool canStart = v.IAmHost && !v.Started, canReset = v.Started && v.GameOver && v.IAmHost;
-            SetActive(roomStart, canStart || canReset);
-            if (canStart || canReset)
+            bool canStart = v.IAmHost && v.Editable;
+            SetActive(roomStart, canStart);
+            if (canStart)
             {
-                SetText(roomStart.GetComponentInChildren<TextMeshProUGUI>(), canStart ? "対戦開始" : "部屋に戻す");
-                bool on = canReset || ready;
+                SetText(roomStart.GetComponentInChildren<TextMeshProUGUI>(), v.GameOver ? "次の対戦を開始" : "対戦開始");
+                bool on = ready;
                 if (roomStart.interactable != on) roomStart.interactable = on;
                 // focus the button when it becomes usable (not on every refresh: that would steal the focus)
                 if (on && (first || !roomStartReady)) SelectInstant(roomStart);
@@ -379,8 +479,7 @@ namespace FamiconWars.Game
             }
             else roomStartReady = false;
             SetText(roomHint, canStart ? (ready ? "" : "両方の席が埋まると開始できます(空席には BOT も置けます)")
-                : canReset ? "席とマップを決め直して次の対戦ができます"
-                : v.Started ? "" : "部屋主が対戦を始めるのを待っています");
+                : v.Editable ? "部屋主が対戦を始めるのを待っています" : "");
 
             UpdateBotMenu(v);
             if (first) SettleButtons(roomBody);
@@ -398,8 +497,8 @@ namespace FamiconWars.Game
             SetText(p.State, kind == SeatKind.Bot ? "COM がサーバーで操作します"
                 : kind == SeatKind.Human ? (v.MySeat == s ? "あなたの席です" : v.SeatOnline[s] ? "準備できています" : "接続が切れています")
                 : "誰でも座れます");
-            bool sit = !v.Started && kind == SeatKind.Empty && v.MySeat != s;
-            bool bot = !v.Started && v.IAmHost && kind != SeatKind.Human;
+            bool sit = v.Editable && kind == SeatKind.Empty && v.MySeat != s;
+            bool bot = v.Editable && v.IAmHost && kind != SeatKind.Human;
             SetActive(p.Sit, sit);
             SetActive(p.Bot, bot);
             if (bot)
@@ -423,7 +522,7 @@ namespace FamiconWars.Game
         {
             int s = botMenuSeat;
             bool open = s >= 0;
-            if (open && (!v.IAmHost || v.Started || v.SeatKinds[s] == SeatKind.Human)) { botMenuSeat = -1; open = false; }
+            if (open && (!v.IAmHost || !v.Editable || v.SeatKinds[s] == SeatKind.Human)) { botMenuSeat = -1; open = false; }
             if (!open)
             {
                 if (botStrip.gameObject.activeSelf && EventSystem.current != null && EventSystem.current.currentSelectedGameObject != null
