@@ -475,6 +475,52 @@ namespace FamiconWars.Tests
         }
 
         [Test]
+        public void TwoBotsPlayDifferentStyles()
+        {
+            for (int k = 0; k < 6; k++)
+            {
+                server.Create(1, "tok" + k, "Aさん", "map01");
+                var code = Last<RoomStatus>(1).Code;
+                server.Action(1, "stand", 0, null);
+                server.Action(1, "bot", 0, "3");
+                server.Action(1, "bot", 1, "3");
+                server.Action(1, "start", 0, null);
+                var log = Last<GameLog>(1);
+                Assert.AreNotEqual(AiPlayer.StyleForSeed(log.BotSeeds[0]), AiPlayer.StyleForSeed(log.BotSeeds[1]));
+                Assert.AreEqual(AiPlayer.StyleForSeed(log.BotSeeds[1]), AiPlayer.ForOnline(Army.Blue, AiProfile.ForLevel(3), log.BotSeeds[1]).Style);
+                server.Disconnected(1);
+            }
+        }
+
+        [Test]
+        public void TheHostChoosesTheBotStyle()
+        {
+            for (int k = 0; k < 6; k++)
+            {
+                server.Create(1, "tokS" + k, "Aさん", "map01");
+                server.Action(1, "stand", 0, null);
+                server.Action(1, "bot", 0, "3");
+                server.Action(1, "bot", 1, "3");
+                server.Action(1, "botstyle", 0, "2");            // red: 物量, blue: random
+                Assert.AreEqual(2, Last<RoomStatus>(1).SeatStyles[0]);
+                Assert.AreEqual(0, Last<RoomStatus>(1).SeatStyles[1]);
+                server.Action(1, "start", 0, null);
+                var log = Last<GameLog>(1);
+                Assert.AreEqual(2, log.BotStyles[0]);
+                Assert.AreEqual(0, log.BotStyles[1]);
+                Assert.AreEqual(AiStyle.Swarm, AiPlayer.ForBot(Army.Red, 3, log.BotStyles[0], log.BotSeeds[0]).Style);
+                // the random one never repeats the chosen one
+                Assert.AreNotEqual(AiStyle.Swarm, AiPlayer.ForBot(Army.Blue, 3, log.BotStyles[1], log.BotSeeds[1]).Style);
+                server.Disconnected(1);
+            }
+            server.Create(2, "tokX", "Bさん", "map01");
+            server.Action(2, "stand", 0, null);
+            server.Join(3, Last<RoomStatus>(2).Code, "tokY", "Cさん");
+            server.Action(3, "botstyle", 0, "1");
+            Assert.IsNotNull(Last<LobbyError>(3), "only the host picks the 戦法");
+        }
+
+        [Test]
         public void RoomDisappearsWhenEveryoneIsGone()
         {
             var code = StartMatch();

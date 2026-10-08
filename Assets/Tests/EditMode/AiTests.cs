@@ -280,6 +280,8 @@ namespace FamiconWars.Tests
                 foreach (var u in s.Units) if (u.Army == Army.Red) u.Acted = true;
                 var prof = AiProfile.ForLevel(3);
                 prof.EcoLateCapRange = lateRange;
+                prof.ApplyStyle(AiStyle.Standard);   // this test is about the late capturer alone:
+                prof.BreakDeadlock = false;          // no 戦法, and no "finish them off" (2 vs 1 is a lead)
                 var ai = new AiPlayer(Army.Red, prof, seed);
                 for (int n = 0; n < 10; n++)
                 {

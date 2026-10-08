@@ -39,6 +39,7 @@ namespace FamiconWars.Core
         public SeatKind[] SeatKinds = new SeatKind[2];
         public string[] SeatNames = new string[2];
         public int[] SeatLevels = new int[2];        // BOT strength 1-4
+        public int[] SeatStyles = new int[2];        // BOT 戦法 chosen by the host: 0 random, 1-3 AiStyle
         public bool[] SeatOnline = new bool[2];
         public int[] MemberIds; public string[] MemberNames; public int[] MemberSeats; public bool[] MemberOnline;
     }
@@ -48,6 +49,7 @@ namespace FamiconWars.Core
         public string MapId; public int MyArmy; public string[] Cmds; public uint[] Seeds;
         public uint[] BotSeeds = new uint[2];        // AiPlayer.ForOnline seed per BOT seat
         public int[] BotLevels = new int[2];         // 0 = not a BOT
+        public int[] BotStyles = new int[2];         // 0 = random (from the seed), 1-3 = AiStyle chosen by the host
     }
     public sealed class Applied : ServerMsg { public int Index; public string Cmd; public uint Seed; public int Hash; }
     public sealed class Rejected : ServerMsg { public string Error; }
@@ -81,6 +83,7 @@ namespace FamiconWars.Core
         public readonly List<RoomMember> Members = new List<RoomMember>();
         public readonly SeatKind[] Seats = new SeatKind[2];
         public readonly int[] BotLevels = new int[2];
+        public readonly int[] BotStyles = new int[2];         // 0 random, 1-3 AiStyle
         public readonly AiPlayer[] Bots = new AiPlayer[2];
         public int HostId = -1, NextMemberId = 1;
         public double BotNextTime;
@@ -88,6 +91,7 @@ namespace FamiconWars.Core
         /// <summary>The match's BOT seats: seeds for AiPlayer.ForOnline and strengths (fixed at the start).</summary>
         public readonly uint[] BotSeeds = new uint[2];
         public readonly int[] MatchBotLevels = new int[2];
+        public readonly int[] MatchBotStyles = new int[2];
         public bool BotsOnServer;
         /// <summary>Last time a command was applied (a host that stops sending BOT moves is replaced).</summary>
         public double LastActivity;
@@ -215,7 +219,8 @@ namespace FamiconWars.Core
         }
 
         /// <summary>
-        /// Lobby actions: "sit" (arg seat), "stand", "bot" (arg seat, level 0-4; host), "map" (text map id; host),
+        /// Lobby actions: "sit" (arg seat), "stand", "bot" (arg seat, level 0-4; host), "botstyle" (arg seat, text 0-3:
+        /// random or a 戦法; host), "map" (text map id; host),
         /// "host" (arg member id; host), "public" (arg 1/0; host), "speed" (arg speed index; host),
         /// "start" (host; also right after a match), "abort" (host: ends the current match as a draw),
         /// "reset" (host, after the match: drop the finished game).
@@ -254,6 +259,12 @@ namespace FamiconWars.Core
                         room.Seats[arg] = level > 0 ? SeatKind.Bot : SeatKind.Empty;
                         room.BotLevels[arg] = level;
                     }
+                    break;
+                case "botstyle":
+                    if (!host) err = "部屋主だけが BOT の戦法を選べます";
+                    else if (!room.Editable) err = "対戦中は変更できません";
+                    else if (arg < 0 || arg > 1) err = "席がありません";
+                    else room.BotStyles[arg] = Math.Max(0, Math.Min(3, text != null && int.TryParse(text, out var st) ? st : 0));
                     break;
                 case "map":
                     if (!host) err = "部屋主だけがマップを選べます";
@@ -310,8 +321,18 @@ namespace FamiconWars.Core
             {
                 bool bot = room.Seats[s] == SeatKind.Bot;
                 room.MatchBotLevels[s] = bot ? Math.Max(1, room.BotLevels[s]) : 0;
+                room.MatchBotStyles[s] = bot ? room.BotStyles[s] : 0;
                 room.BotSeeds[s] = bot ? nextSeed() : 0;
                 room.Bots[s] = null;
+            }
+            // BOT vs BOT: a random 戦法 never comes out the same as the other side's (the same 戦法 on both
+            // sides tends to grind on); 戦法 the host chose are kept as they are
+            if (room.MatchBotLevels[0] > 0 && room.MatchBotLevels[1] > 0)
+            {
+                if (room.MatchBotStyles[1] == 0)
+                    room.BotSeeds[1] = AiPlayer.SeedForStyleOtherThan(room.BotSeeds[1], AiPlayer.BotStyle(room.MatchBotStyles[0], room.BotSeeds[0]));
+                else if (room.MatchBotStyles[0] == 0)
+                    room.BotSeeds[0] = AiPlayer.SeedForStyleOtherThan(room.BotSeeds[0], (AiStyle)room.MatchBotStyles[1]);
             }
             room.BotsOnServer = false;
             room.BotNextTime = 0;
@@ -387,7 +408,8 @@ namespace FamiconWars.Core
             if (room.BotsOnServer) return;
             room.BotsOnServer = true;
             for (int s = 0; s < 2; s++)
-                room.Bots[s] = room.MatchBotLevels[s] > 0 ? new AiPlayer((Army)s, AiProfile.ForLevel(room.MatchBotLevels[s]), nextSeed()) : null;
+                // same seed as the host played with: the BOT keeps its 戦法 (and phase-seeded choices)
+                room.Bots[s] = room.MatchBotLevels[s] > 0 ? AiPlayer.ForBot((Army)s, room.MatchBotLevels[s], room.MatchBotStyles[s], room.BotSeeds[s]) : null;
             room.BotNextTime = 0;
             SendStatus(room);
         }
@@ -508,7 +530,7 @@ namespace FamiconWars.Core
                     Code = room.Code, MapId = room.MapId, Started = room.Started, GameOver = room.GameOver, Public = room.Public,
                     Speed = room.Speed, BotsOnServer = room.BotsOnServer,
                     MyId = m.Id, MySeat = m.Seat, HostId = room.HostId,
-                    SeatKinds = (SeatKind[])room.Seats.Clone(), SeatNames = seatNames, SeatLevels = (int[])room.BotLevels.Clone(), SeatOnline = seatOnline,
+                    SeatKinds = (SeatKind[])room.Seats.Clone(), SeatNames = seatNames, SeatLevels = (int[])room.BotLevels.Clone(), SeatStyles = (int[])room.BotStyles.Clone(), SeatOnline = seatOnline,
                     MemberIds = ids, MemberNames = names, MemberSeats = seats, MemberOnline = online
                 });
             }
@@ -518,7 +540,7 @@ namespace FamiconWars.Core
             new GameLog
             {
                 MapId = room.PlayedMapId ?? room.MapId, MyArmy = seat < 0 ? -1 : seat, Cmds = room.Cmds.ToArray(), Seeds = room.Seeds.ToArray(),
-                BotSeeds = (uint[])room.BotSeeds.Clone(), BotLevels = (int[])room.MatchBotLevels.Clone()
+                BotSeeds = (uint[])room.BotSeeds.Clone(), BotLevels = (int[])room.MatchBotLevels.Clone(), BotStyles = (int[])room.MatchBotStyles.Clone()
             };
     }
 

@@ -34,10 +34,10 @@ namespace FamiconWars.Net
         public string code; public string mapId; public bool started, gameOver, isPublic;
         public int myId, mySeat, hostId;
         public int speed; public bool botsOnServer;
-        public int[] seatKinds; public string[] seatNames; public int[] seatLevels; public bool[] seatOnline;
+        public int[] seatKinds; public string[] seatNames; public int[] seatLevels; public int[] seatStyles; public bool[] seatOnline;
         public int[] memberIds; public string[] memberNames; public int[] memberSeats; public bool[] memberOnline;
     }
-    public struct GameLogMsg : NetworkMessage { public string mapId; public int myArmy; public string[] cmds; public uint[] seeds; public uint[] botSeeds; public int[] botLevels; }
+    public struct GameLogMsg : NetworkMessage { public string mapId; public int myArmy; public string[] cmds; public uint[] seeds; public uint[] botSeeds; public int[] botLevels; public int[] botStyles; }
     public struct AppliedMsg : NetworkMessage { public int index; public string cmd; public uint seed; public int hash; }
     public struct RejectedMsg : NetworkMessage { public string error; }
     public struct LobbyErrorMsg : NetworkMessage { public string error; }
@@ -50,7 +50,7 @@ namespace FamiconWars.Net
     public static class NetConfig
     {
         /// <summary>Bump whenever messages or rules change: client and server must match.</summary>
-        public const int ProtocolVersion = 4;
+        public const int ProtocolVersion = 6;
         public static ushort ServerPort = 7782;
         public const string PublicUrl = "wss://nine.freeddns.org/fw";
         public const string TokenKey = "fw.clientToken";
@@ -240,11 +240,11 @@ namespace FamiconWars.Net
                     {
                         code = s.Code, mapId = s.MapId, started = s.Started, gameOver = s.GameOver, isPublic = s.Public,
                         myId = s.MyId, mySeat = s.MySeat, hostId = s.HostId, speed = s.Speed, botsOnServer = s.BotsOnServer,
-                        seatKinds = new[] { (int)s.SeatKinds[0], (int)s.SeatKinds[1] }, seatNames = s.SeatNames, seatLevels = s.SeatLevels, seatOnline = s.SeatOnline,
+                        seatKinds = new[] { (int)s.SeatKinds[0], (int)s.SeatKinds[1] }, seatNames = s.SeatNames, seatLevels = s.SeatLevels, seatStyles = s.SeatStyles, seatOnline = s.SeatOnline,
                         memberIds = s.MemberIds, memberNames = s.MemberNames, memberSeats = s.MemberSeats, memberOnline = s.MemberOnline
                     });
                     break;
-                case GameLog l: c.Send(new GameLogMsg { mapId = l.MapId, myArmy = l.MyArmy, cmds = l.Cmds, seeds = l.Seeds, botSeeds = l.BotSeeds, botLevels = l.BotLevels }); break;
+                case GameLog l: c.Send(new GameLogMsg { mapId = l.MapId, myArmy = l.MyArmy, cmds = l.Cmds, seeds = l.Seeds, botSeeds = l.BotSeeds, botLevels = l.BotLevels, botStyles = l.BotStyles }); break;
                 case Applied a: c.Send(new AppliedMsg { index = a.Index, cmd = a.Cmd, seed = a.Seed, hash = a.Hash }); break;
                 case Rejected r: c.Send(new RejectedMsg { error = r.Error }); break;
                 case LobbyError e: c.Send(new LobbyErrorMsg { error = e.Error }); break;

@@ -13,6 +13,8 @@ namespace FamiconWars.Game
         public string MapId = "map01";
         /// <summary>Per army: 0 = human, 1..4 = COM level.</summary>
         public int[] Players = { 0, 2 };
+        /// <summary>Per army, for a COM: 0 = random 戦法 (kept secret), 1 速攻, 2 物量, 3 精鋭.</summary>
+        public int[] Styles = { 0, 0 };
         /// <summary>0 ゆっくり, 1 ふつう, 2 はやい, 3 最速.</summary>
         public int Speed = 1;
         public bool BattleAnimation = true;
@@ -55,6 +57,8 @@ namespace FamiconWars.Game
         {
             if (Players == null || Players.Length != 2) Players = new[] { 0, 2 };
             for (int i = 0; i < 2; i++) Players[i] = Mathf.Clamp(Players[i], 0, 4);
+            if (Styles == null || Styles.Length != 2) Styles = new[] { 0, 0 };
+            for (int i = 0; i < 2; i++) Styles[i] = Mathf.Clamp(Styles[i], 0, 3);
             Speed = Mathf.Clamp(Speed, 0, SpeedNames.Length - 1);
             BgmVolume = Mathf.Clamp(BgmVolume, 0, 100);
             SeVolume = Mathf.Clamp(SeVolume, 0, 100);
@@ -77,15 +81,15 @@ namespace FamiconWars.Game
             new MapEntry { Id = "map01", Name = "演習島", Width = 18, Height = 12, Ready = true,
                 Note = "川で分かれた2つの陸地を3本の橋がつなぐ。最初の一戦に。" },
             new MapEntry { Id = "map02", Name = "ふたつの海峡", Width = 22, Height = 14, Ready = true,
-                Note = "海峡が陸を分ける。両端の長い橋か、揚陸艦で中央の島と対岸へ。" },
+                Note = "海峡が陸を分ける。両端と中央の島を通る橋で渡る。港が8つあり、戦艦で海から撃ち合える。" },
             new MapEntry { Id = "map03", Name = "山岳回廊", Width = 20, Height = 14, Ready = true,
-                Note = "山脈を3つの峠が抜ける。歩兵と間接攻撃が主役。" },
+                Note = "山が点在する3本の広い道。中央の都市の取り合い。" },
             new MapEntry { Id = "map04", Name = "群島決戦", Width = 24, Height = 16, Ready = true,
-                Note = "島々を橋がつなぐ。空港と港を活かした航空・海上の総力戦。" },
+                Note = "中央の島へ広い橋、外周に長い橋。港の前の海から戦艦で島と橋を狙える。" },
             new MapEntry { Id = "map05", Name = "対戦用 A", Width = 20, Height = 14, Ready = true,
-                Note = "点対称の平原。森と山が少し、道は一本。後手は都市が1つ多い。" },
+                Note = "点対称の平原。都市は中央に多く、道は一本。後手は都市が1つ多い。" },
             new MapEntry { Id = "map06", Name = "対戦用 B", Width = 22, Height = 15, Ready = true,
-                Note = "中央を川が横切る点対称マップ。6本の橋の取り合い。" },
+                Note = "中央を川が横切る点対称マップ。橋と浅瀬で10か所から渡れ、川べりの都市を奪い合う。" },
         };
 
         public static MapEntry Find(string id)

@@ -19,6 +19,7 @@ namespace FamiconWars.Game
         public SeatKind[] SeatKinds = new SeatKind[2];
         public string[] SeatNames = new string[2];
         public int[] SeatLevels = new int[2];
+        public int[] SeatStyles = new int[2];     // BOT 戦法: 0 random, 1-3
         public bool[] SeatOnline = new bool[2];
         public readonly List<(int id, string name, int seat, bool online, bool host, bool me)> Members = new List<(int, string, int, bool, bool, bool)>();
     }
@@ -39,10 +40,11 @@ namespace FamiconWars.Game
     {
         public event Action<string> OnOnlineCreate;          // address
         public event Action<string, string> OnOnlineJoin;    // address, code
-        public event Action OnOnlineBack, OnOnlineRefresh;
+        public event Action OnOnlineBack, OnOnlineRefresh, OnSpectatorBack, OnRoomWatch;
         public event Action<bool> OnRoomPublic;
         public event Action<int> OnRoomSit, OnRoomHost, OnRoomMap;   // seat / member id / map step (-1, +1)
         public event Action<int, int> OnRoomBot;             // seat, level 0-4
+        public event Action<int, int> OnRoomBotStyle;        // seat, 戦法 0 random / 1-3
         public event Action OnRoomStand, OnRoomStart, OnRoomLeave;
 
         RectTransform onlineRoot, onlineForm, roomRoot, roomBody;
@@ -132,6 +134,21 @@ namespace FamiconWars.Game
 
             onlineRoot.gameObject.SetActive(false);
             roomRoot.gameObject.SetActive(false);
+        }
+
+        // ---- spectators: leave the board for the room screen (the room is kept) ----
+        Button spectatorBackBtn;
+
+        public void SetSpectatorBack(bool visible)
+        {
+            if (spectatorBackBtn == null)
+            {
+                if (!visible) return;
+                spectatorBackBtn = MakeButton("SpectatorBack", canvasRt, "部屋に戻る", false, () => OnSpectatorBack?.Invoke());
+                Pin((RectTransform)spectatorBackBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-336, -92), new Vector2(260, 52), pivot: new Vector2(1, 1));
+            }
+            if (visible && !spectatorBackBtn.gameObject.activeSelf) spectatorBackBtn.transform.SetAsLastSibling();
+            SetActive(spectatorBackBtn, visible);
         }
 
         // ---- host: end the current match (under the top bar, left of the zoom readout) ----
@@ -315,9 +332,11 @@ namespace FamiconWars.Game
         // ---- room page parts: built once, then only updated (no rebuilding, so nothing flickers) ----
         TextMeshProUGUI roomCodeLabel, roomInvite, roomMapName, roomMapNote, roomMembersTitle, roomHint;
         RawImage roomMapPreview;
-        Button roomMapPrev, roomMapNext, roomLeave, roomStand, roomStart;
+        Button roomMapPrev, roomMapNext, roomLeave, roomStand, roomStart, roomWatch;
         RectTransform botBlocker, botStrip;
         readonly Button[] botLevelButtons = new Button[5];
+        readonly Button[] botStyleButtons = new Button[4];
+        static readonly string[] StyleLabels = { "ランダム", "速攻", "物量", "精鋭" };
         bool roomStartReady;
         sealed class SeatParts
         {
@@ -393,6 +412,9 @@ namespace FamiconWars.Game
             Pin(roomHint.rectTransform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-420, 66), new Vector2(760, 44), pivot: new Vector2(1, 0));
             roomStart = MakeButton("Start", roomBody, "対戦開始", true, () => OnRoomStart?.Invoke());
             Pin((RectTransform)roomStart.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-96, 56), new Vector2(300, 64), pivot: new Vector2(1, 0));
+            // during a match, from the room screen back to the board
+            roomWatch = MakeButton("Watch", roomBody, "観戦に戻る", true, () => OnRoomWatch?.Invoke());
+            Pin((RectTransform)roomWatch.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-96, 56), new Vector2(300, 64), pivot: new Vector2(1, 0));
 
             // BOT strength list: a click outside closes it (last, so it is drawn over the page)
             var blocker = MakeButton("BotMenuBlocker", roomBody, "", false, () => SetBotMenu(-1));
@@ -402,12 +424,21 @@ namespace FamiconWars.Game
             const float w = 112, gap = 8;
             botStrip = Panel("BotMenu", roomBody, PlateRaised);
             Edge(botStrip, Brass);
-            Pin(botStrip, new Vector2(0, 1), new Vector2(0, 1), Vector2.zero, new Vector2(BotLabels.Length * (w + gap) + gap, 72), pivot: new Vector2(0, 1));
+            float stripW = BotLabels.Length * (w + gap) + gap;
+            Pin(botStrip, new Vector2(0, 1), new Vector2(0, 1), Vector2.zero, new Vector2(stripW, 136), pivot: new Vector2(0, 1));
             for (int i = 0; i < BotLabels.Length; i++)
             {
                 int lv = i;
                 botLevelButtons[i] = MakeButton("Lv" + i, botStrip, BotLabels[i], false, () => PickBot(botMenuSeat, lv));
-                Pin((RectTransform)botLevelButtons[i].transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(gap + i * (w + gap), 0), new Vector2(w, 56), pivot: new Vector2(0, 0.5f));
+                Pin((RectTransform)botLevelButtons[i].transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(gap + i * (w + gap), -gap), new Vector2(w, 56), pivot: new Vector2(0, 1));
+            }
+            // second row: the BOT's 戦法 (random ones are not shown during the match)
+            float sw = (stripW - gap) / StyleLabels.Length - gap;
+            for (int i = 0; i < StyleLabels.Length; i++)
+            {
+                int st = i;
+                botStyleButtons[i] = MakeButton("Style" + i, botStrip, StyleLabels[i], false, () => PickBotStyle(botMenuSeat, st));
+                Pin((RectTransform)botStyleButtons[i].transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(gap + i * (sw + gap), -gap - 56 - gap), new Vector2(sw, 56), pivot: new Vector2(0, 1));
             }
             botBlocker.gameObject.SetActive(false);
             botStrip.gameObject.SetActive(false);
@@ -508,6 +539,9 @@ namespace FamiconWars.Game
                 roomStartReady = on;
             }
             else roomStartReady = false;
+            bool watch = v.Started && !v.GameOver;
+            SetActive(roomWatch, watch);
+            if (watch) SetText(roomWatch.GetComponentInChildren<TextMeshProUGUI>(), v.MySeat >= 0 ? "対戦に戻る" : "観戦に戻る");
             SetText(roomHint, canStart ? (ready ? "" : "両方の席が埋まると開始できます(空席には BOT も置けます)")
                 : v.Editable ? "部屋主が対戦を始めるのを待っています" : "");
 
@@ -524,7 +558,7 @@ namespace FamiconWars.Game
             p.Icon.color = new Color(1, 1, 1, p.Icon.sprite == null || kind == SeatKind.Empty ? 0.18f : 1f);
             SetText(p.Who, kind == SeatKind.Empty ? "空席" : v.SeatNames[s]);
             p.Who.color = kind == SeatKind.Empty ? Muted : Paper;
-            SetText(p.State, kind == SeatKind.Bot ? "COM がサーバーで操作します"
+            SetText(p.State, kind == SeatKind.Bot ? "戦法: " + StyleLabels[Math.Max(0, Math.Min(3, v.SeatStyles[s]))]
                 : kind == SeatKind.Human ? (v.MySeat == s ? "あなたの席です" : v.SeatOnline[s] ? "準備できています" : "接続が切れています")
                 : "誰でも座れます");
             bool sit = v.Editable && kind == SeatKind.Empty && v.MySeat != s;
@@ -564,6 +598,12 @@ namespace FamiconWars.Game
             int level = v.SeatKinds[s] == SeatKind.Bot ? v.SeatLevels[s] : 0;
             bool wasOpen = botStrip.gameObject.activeSelf;
             for (int i = 0; i < botLevelButtons.Length; i++) StyleButton(botLevelButtons[i], i == level);
+            int style = v.SeatStyles[s];
+            for (int i = 0; i < botStyleButtons.Length; i++)
+            {
+                StyleButton(botStyleButtons[i], level > 0 && i == style);
+                if (botStyleButtons[i].interactable != level > 0) botStyleButtons[i].interactable = level > 0;
+            }
             var bot = (RectTransform)seatParts[s].Bot.transform;
             // top-left of the BOT button in page coordinates (card 480 x 300 pinned top-left at CardPos)
             botStrip.anchoredPosition = seatParts[s].CardPos + new Vector2(bot.anchoredPosition.x, -300 + 24 + 56) + new Vector2(-8, -8);
@@ -577,7 +617,7 @@ namespace FamiconWars.Game
         void PickBot(int s, int level)
         {
             if (s < 0) return;
-            botMenuSeat = -1;
+            if (level == 0) botMenuSeat = -1;     // with a BOT, the list stays open for its 戦法
             if (lastRoomView != null && lastRoomView.SeatKinds[s] != SeatKind.Human)
             {
                 lastRoomView.SeatKinds[s] = level > 0 ? SeatKind.Bot : SeatKind.Empty;
@@ -586,6 +626,17 @@ namespace FamiconWars.Game
                 ShowRoom(lastRoomView, roomPreview);
             }
             OnRoomBot?.Invoke(s, level);
+        }
+
+        void PickBotStyle(int s, int style)
+        {
+            if (s < 0) return;
+            if (lastRoomView != null)
+            {
+                lastRoomView.SeatStyles[s] = style;
+                ShowRoom(lastRoomView, roomPreview);
+            }
+            OnRoomBotStyle?.Invoke(s, style);
         }
     }
 }

@@ -23,6 +23,8 @@ namespace FamiconWars.Game
         GameSettings editing;
         bool setupRowsBuilt;
         List<Button> segRed, segBlue, segSpeed, segAnim, segBgm;
+        List<Button> segRedStyle, segBlueStyle;
+        TextMeshProUGUI styleLabelRed, styleLabelBlue;
         Slider setupBgmVol, setupSeVol;
         TextMeshProUGUI setupBgmVal, setupSeVal;
         static readonly int[] VolumeSteps = { 0, 25, 50, 75, 100 };
@@ -231,7 +233,7 @@ namespace FamiconWars.Game
             setupRoot = Panel("SetupScreen", canvasRt, Backdrop);
             Fill(setupRoot, 0, 0, 0, 0);
             setupCard = Panel("Card", setupRoot, Plate);
-            Pin(setupCard, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1120, 900));
+            Pin(setupCard, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1120, 1000));
             Edge(setupCard, Brass);
             var title = Label("Title", setupCard, SizeTitle, Paper, TextAlignmentOptions.MidlineLeft, true);
             title.text = "対戦設定";
@@ -255,30 +257,37 @@ namespace FamiconWars.Game
         {
             setupRowsBuilt = true;
             string[] kinds = { "人間", "COM 弱い", "COM 普通", "COM 強い", "COM 最強" };
+            string[] styles = { "ランダム", "速攻", "物量", "精鋭" };
             ArmyTab(Army.Red, -104);
-            segRed = Segment(-104, 64, kinds, i => editing.Players[0] = i);
-            ArmyTab(Army.Blue, -184);
-            segBlue = Segment(-184, 64, kinds, i => editing.Players[1] = i);
-            Rule(-268);
+            segRed = Segment(-104, 64, kinds, i => { editing.Players[0] = i; UpdateStyleRows(); });
+            styleLabelRed = RowLabel("戦法", -176);
+            styleLabelRed.alignment = TextAlignmentOptions.MidlineRight;
+            segRedStyle = Segment(-176, 48, styles, i => editing.Styles[0] = i);
+            ArmyTab(Army.Blue, -248);
+            segBlue = Segment(-248, 64, kinds, i => { editing.Players[1] = i; UpdateStyleRows(); });
+            styleLabelBlue = RowLabel("戦法 ", -320);
+            styleLabelBlue.alignment = TextAlignmentOptions.MidlineRight;
+            segBlueStyle = Segment(-320, 48, styles, i => editing.Styles[1] = i);
+            Rule(-392);
 
-            RowLabel("ゲーム速度", -292);
-            segSpeed = Segment(-292, 56, GameSettings.SpeedNames, i => editing.Speed = i);
-            RowLabel("戦闘アニメ", -364);
-            segAnim = Segment(-364, 56, new[] { "オン", "オフ" }, i => editing.BattleAnimation = i == 0);
-            Rule(-440);
+            RowLabel("ゲーム速度", -412);
+            segSpeed = Segment(-412, 56, GameSettings.SpeedNames, i => editing.Speed = i);
+            RowLabel("戦闘アニメ", -484);
+            segAnim = Segment(-484, 56, new[] { "オン", "オフ" }, i => editing.BattleAnimation = i == 0);
+            Rule(-560);
 
-            var head = RowLabel("サウンド", -460);
+            var head = RowLabel("サウンド", -580);
             head.color = Paper; head.fontStyle = FontStyles.Bold;
             var soundNote = Label("SoundNote", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
             soundNote.text = "変えるとすぐに反映されます(効果音は試しに鳴ります)";
-            Pin(soundNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -466), new Vector2(700, 32), pivot: new Vector2(0, 1));
+            Pin(soundNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -586), new Vector2(700, 32), pivot: new Vector2(0, 1));
 
-            RowLabel("BGM", -512);
-            segBgm = Segment(-512, 56, new[] { "オン", "オフ" }, i => { editing.BgmEnabled = i == 0; GameAudio.Apply(editing); });
-            RowLabel("BGM 音量", -580);
-            setupBgmVol = MakeSlider("BgmVolume", setupCard, new Vector2(240, -580), 780, out setupBgmVal, v => { editing.BgmVolume = v; GameAudio.Apply(editing); }, null);
-            RowLabel("効果音 音量", -648);
-            setupSeVol = MakeSlider("SeVolume", setupCard, new Vector2(240, -648), 780, out setupSeVal, v => { editing.SeVolume = v; GameAudio.Apply(editing); }, () => GameAudio.Se("capture_done", 1f, 0));
+            RowLabel("BGM", -628);
+            segBgm = Segment(-628, 56, new[] { "オン", "オフ" }, i => { editing.BgmEnabled = i == 0; GameAudio.Apply(editing); });
+            RowLabel("BGM 音量", -696);
+            setupBgmVol = MakeSlider("BgmVolume", setupCard, new Vector2(240, -696), 780, out setupBgmVal, v => { editing.BgmVolume = v; GameAudio.Apply(editing); }, null);
+            RowLabel("効果音 音量", -764);
+            setupSeVol = MakeSlider("SeVolume", setupCard, new Vector2(240, -764), 780, out setupSeVal, v => { editing.SeVolume = v; GameAudio.Apply(editing); }, () => GameAudio.Se("capture_done", 1f, 0));
         }
 
         public void ShowSetupScreen(GameSettings s, string mapName)
@@ -288,12 +297,26 @@ namespace FamiconWars.Game
             setupMapName.text = "マップ: " + mapName;
             Select(segRed, s.Players[0]);
             Select(segBlue, s.Players[1]);
+            Select(segRedStyle, s.Styles[0]);
+            Select(segBlueStyle, s.Styles[1]);
+            UpdateStyleRows();
             Select(segSpeed, s.Speed);
             Select(segAnim, s.BattleAnimation ? 0 : 1);
             Select(segBgm, s.BgmEnabled ? 0 : 1);
             SetSlider(setupBgmVol, setupBgmVal, s.BgmVolume);
             SetSlider(setupSeVol, setupSeVal, s.SeVolume);
             ShowOnly(setupRoot, setupStart);
+        }
+
+        /// <summary>The 戦法 row of an army is shown only while that army is a COM.</summary>
+        void UpdateStyleRows()
+        {
+            if (editing == null || segRedStyle == null) return;
+            bool r = editing.Players[0] > 0, b = editing.Players[1] > 0;
+            foreach (var x in segRedStyle) if (x.gameObject.activeSelf != r) x.gameObject.SetActive(r);
+            foreach (var x in segBlueStyle) if (x.gameObject.activeSelf != b) x.gameObject.SetActive(b);
+            styleLabelRed.gameObject.SetActive(r);
+            styleLabelBlue.gameObject.SetActive(b);
         }
 
         static int Nearest(int v)

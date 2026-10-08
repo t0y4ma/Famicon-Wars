@@ -23,6 +23,19 @@ namespace FamiconWars.Core
         Formation = 4096,     // act before moving, move the front first, keep bridges and lanes clear
     }
 
+    /// <summary>
+    /// The COM's habit of thought (戦法). Each one leans the evaluation and the production one way, so
+    /// two COMs with different habits do not mirror each other and one of them gets the upper hand
+    /// (which one depends on the matchup and on the map; measured with Tools/Sim "styles"):
+    /// 速攻 (Blitz): a vehicle army (tanks, few foot soldiers and guns) that trades freely and keeps
+    ///   moving forward.
+    /// 物量 (Swarm): foot soldiers from the first day; pushes forward early, then holds a line in the
+    ///   middle of the map: mech in front, light guns placed to cover the tiles in front of it.
+    /// 精鋭 (Elite): heavier units, refilled early and pulled back for repairs early so that they last.
+    /// Which one wins depends on the map as much as on the pairing (Tools/Sim "styles2").
+    /// </summary>
+    public enum AiStyle { Auto = -1, Standard = 0, Blitz = 1, Swarm = 2, Elite = 3 }
+
     public sealed class AiProfile
     {
         public int Level;
@@ -59,7 +72,64 @@ namespace FamiconWars.Core
         public bool JoinCapture = true;        // join a capturing squad: the capture gauge is kept, so the capture finishes sooner
         public bool TransportTactics = true;   // early: a truck carries infantry to far properties; afterwards it stands in front of them as a wall       // a battered front unit steps back so a fresh one can take its tile      // infantry share / quality rules apply only once the army reaches this fraction of the unit limit (0 = always)
 
+        // ---- 戦法 (style) ----
+        public AiStyle Style = AiStyle.Auto;   // Auto: picked from the COM's seed (Lv2 and up)
+        public float ProdDirect = 1f, ProdIndirect = 1f, ProdFoot = 1f;   // production weight per kind of unit
+        public float PricePref = 0f;           // production weight x (price / 6000)^PricePref for combat vehicles: <0 cheap, >0 heavy
+        public float EarlyPush = 0f;           // "go for the base" from day 8 on, whatever the balance (0..1)
+        public bool IndirectFirst = true;      // guns fire before the direct-fire units move in
+        public bool Gunships = false;          // 精鋭: against a foot army with little anti-air, armed helicopters as fighting units
+        public bool SlotMerge = false;         // 精鋭: near the unit limit, merge battered units to free slots for heavy ones
+        public bool Focus = false;             // middle game: the fighting units mass on one enemy property at a time
+        public bool Phases = true;             // the end game: from a day set by the map size, everything goes for the enemy base
+        public int LateBase = 12, LateSpan = 10; // end game from day LateBase + (distance between the bases) / 2, in full LateSpan days later
+        public bool KillZone = false;          // 物量: guns stand where they cover the tiles in front of the line
+        public int RepairAt = 60;              // battered units (this HP or less) go to a city to be repaired
+        public bool CarefulSupply = false;     // refill early (ammo at half) and pull back valuable units for repairs           // 精鋭: after the capture race, defend and save, then buy heavy units all at once and strike
+        public int HoldFromDay = 0;            // 物量: push forward until this day, then hold the line (0 = off)
+        public float MechPref = 1f;            // weight of mech (anti-tank foot soldiers) once the capture race is over
+        public int AirPerAirport = 2;          // aircraft kept per airport we own (they have to come back to refuel)
+        public bool BreakDeadlock = true;      // at the unit limit with money piling up, trade more readily
+
+        public static readonly string[] StyleNames = { "標準", "速攻", "物量", "精鋭" };
+
         public bool Has(AiFeature f) => (Features & f) != 0;
+
+        public AiProfile Clone() => (AiProfile)MemberwiseClone();
+
+        /// <summary>Applies a 戦法 on top of the level's weights.</summary>
+        public bool StyleApplied { get; private set; }
+
+        public void ApplyStyle(AiStyle st)
+        {
+            if (StyleApplied) return;
+            StyleApplied = true;
+            Style = st;
+            switch (st)
+            {
+                case AiStyle.Blitz:
+                    // vehicles: tanks and trucks, hardly any foot soldiers or guns; fast, trades freely and
+                    // keeps moving forward
+                    WLoss *= 0.7f; WThreat *= 0.5f; WAdvance *= 1.5f; FocusFire = true;
+                    ProdDirect = 1.8f; ProdIndirect = 0.4f; ProdFoot = 0.9f; PricePref = 0.3f;
+                    break;
+                case AiStyle.Swarm:
+                    // foot soldiers from the first day: pushes forward early, then digs in on a line of
+                    // mech (anti-tank) and light guns before the enemy's tanks arrive
+                    WCapture *= 1.2f;
+                    ProdFoot = 1.6f; ProdIndirect = 1.2f; ProdDirect = 0.6f; PricePref = -0.4f;
+                    HoldFromDay = 9; MechPref = 2.5f; KillZone = true;
+                    break;
+                case AiStyle.Elite:
+                    // heavier units, kept alive: refilled at half ammo and pulled back for repairs early, so
+                    // that they are still there late, when every unit slot counts
+                    FocusFire = true;
+                    ProdDirect = 1.4f; ProdIndirect = 1.2f; PricePref = 0.8f;
+                    RepairAt = 70; CarefulSupply = true;
+                    Gunships = true; SlotMerge = true;
+                    break;
+            }
+        }
         public int Depth => Has(AiFeature.Lookahead) ? 3 : Has(AiFeature.GlobalOrder) ? 2 : Has(AiFeature.Threat) ? 1 : 0;
 
         public static readonly string[] Names = { "弱い", "普通", "強い", "最強" };
@@ -96,13 +166,46 @@ namespace FamiconWars.Core
         bool resupplyConsidered;
         readonly HashSet<int> forceWait = new HashSet<int>();
         readonly HashSet<int> done = new HashSet<int>();
+        readonly HashSet<int> refill = new HashSet<int>();     // stay put this phase: 全補 at the end of it
         readonly HashSet<int> productionTried = new HashSet<int>();
         const int Inf = 1 << 20;
 
         public AiPlayer(Army army, AiProfile profile, uint seed)
         {
-            Army = army; Profile = profile; rng = new Rng(seed);
+            Army = army; rng = new Rng(seed);
+            Profile = profile.Clone();
+            if (Profile.Style == AiStyle.Auto)
+                Profile.ApplyStyle(Profile.Level >= 2 ? StyleForSeed(seed) : AiStyle.Standard);
+            else Profile.ApplyStyle(Profile.Style);       // no-op when the caller already applied (and tuned) it
         }
+
+        /// <summary>The 戦法 a COM (Lv2 and up) with this seed plays.</summary>
+        public static AiStyle StyleForSeed(uint seed) => (AiStyle)(1 + (int)(PhaseSeed(seed, 7777) % 3u));
+
+        /// <summary>A seed near `seed` whose random 戦法 is not `other`: two COMs facing each other play
+        /// different 戦法 so that one of them has the upper hand.</summary>
+        public static uint SeedForStyleOtherThan(uint seed, AiStyle other)
+        {
+            for (uint k = 0; k < 64; k++)
+                if (StyleForSeed(seed + k * 7919u) != other) return seed + k * 7919u;
+            return seed;
+        }
+
+        public static uint SeedWithOtherStyle(uint seed, uint other) => SeedForStyleOtherThan(seed, StyleForSeed(other));
+
+        /// <summary>The 戦法 a BOT / COM plays: the chosen one (1-3), or for 0 (random) the one its seed picks.</summary>
+        public static AiStyle BotStyle(int chosen, uint seed) => chosen > 0 ? (AiStyle)chosen : StyleForSeed(seed);
+
+        /// <summary>An online BOT: level, the 戦法 setting (0 random, 1-3) and the seed shared by every client.</summary>
+        public static AiPlayer ForBot(Army army, int level, int style, uint seed)
+        {
+            var p = AiProfile.ForLevel(level);
+            if (style > 0) p.Style = (AiStyle)style;
+            return ForOnline(army, p, seed);
+        }
+
+        /// <summary>The 戦法 this COM plays (for display).</summary>
+        public AiStyle Style => Profile.Style;
 
         // Online BOTs: every phase starts from a state that depends only on (seed, day, army), so any
         // client can compute the BOT's moves (the room host plays them, the others check them), and a
@@ -132,7 +235,7 @@ namespace FamiconWars.Core
             if (key != phaseKey)
             {
                 phaseKey = key; commandsThisPhase = 0; resupplyConsidered = false; savingThisPhase = false; lateCapThisPhase = false; strategicPlanned = false; strategic = null;
-                forceWait.Clear(); done.Clear(); productionTried.Clear();
+                forceWait.Clear(); done.Clear(); productionTried.Clear(); refill.Clear();
                 if (phaseSeeded) { rng = new Rng(PhaseSeed(phaseSeedBase, key)); reliefUnit = reliefTile = -1; }
             }
             if (++commandsThisPhase > 300) return new EndPhaseCommand { Army = Army };
@@ -143,11 +246,7 @@ namespace FamiconWars.Core
                 simData = s.Data.WithRules(r);
             }
 
-            if (!resupplyConsidered)
-            {
-                resupplyConsidered = true;
-                if (Profile.Has(AiFeature.Resupply) && ShouldResupply(s)) return new ResupplyAllCommand { Army = Army };
-            }
+            if (commandsThisPhase == 1 && Profile.Has(AiFeature.Resupply)) PickRefill(s);
 
             foreach (var u in s.Units)
                 if (u.Army == Army && !u.Acted && !u.IsCarried && forceWait.Contains(u.Id) && done.Add(u.Id))
@@ -155,6 +254,12 @@ namespace FamiconWars.Core
 
             var cmd = ChooseUnitCommand(s);
             if (cmd != null) return cmd;
+            // everyone else has acted, so 全補 now refills only the units that stayed for it
+            if (!resupplyConsidered && refill.Count > 0)
+            {
+                resupplyConsidered = true;
+                if (RulesEngine.CheckResupply(s, out _, out _) == null) return new ResupplyAllCommand { Army = Army };
+            }
             var p = ChooseProduction(s);
             if (p != null) return p;
             return new EndPhaseCommand { Army = Army };
@@ -175,10 +280,11 @@ namespace FamiconWars.Core
         {
             var units = new List<UnitState>();
             foreach (var u in s.Units)
-                if (u.Army == Army && !u.Acted && !u.IsCarried && !forceWait.Contains(u.Id) && !done.Contains(u.Id)) units.Add(u);
+                if (u.Army == Army && !u.Acted && !u.IsCarried && !forceWait.Contains(u.Id) && !done.Contains(u.Id) && !refill.Contains(u.Id)) units.Add(u);
             if (units.Count == 0) return null;
             var ctx = new Ctx(s, this);
-            if (Profile.Has(AiFeature.Formation) && Profile.RotateWeak)
+            // (end game: no stepping back to rest; everything stays in the fight)
+            if (Profile.Has(AiFeature.Formation) && Profile.RotateWeak && pushNow0(s) < 0.5f)
             {
                 if (reliefUnit >= 0)
                 {
@@ -212,7 +318,16 @@ namespace FamiconWars.Core
                 // 1) everything that does something (attack, capture, unload, join...) goes before plain moves,
                 //    so a unit walking up from the rear never takes the tile a front unit needed to fire from.
                 var acts = all.FindAll(c => c.Cmd.Action != UnitAction.Wait && c.Score > 0);
-                if (acts.Count > 0) all = acts;
+                if (acts.Count > 0)
+                {
+                    all = acts;
+                    // guns fire first (they take no counter-fire), the direct-fire units then finish off what is left
+                    if (Profile.IndirectFirst)
+                    {
+                        var guns = acts.FindAll(c => c.Cmd.Action == UnitAction.Attack && s.Def(s.UnitById(c.Cmd.UnitId)).IsIndirect);
+                        if (guns.Count > 0) all = guns;
+                    }
+                }
                 else
                 {
                     // 2) plain moves: the unit closest to the enemy moves first and makes room for the others.
@@ -248,7 +363,7 @@ namespace FamiconWars.Core
                 {
                     var ctx2 = new Ctx(sim, this);
                     foreach (var u2 in sim.Units)
-                        if (u2.Army == Army && !u2.Acted && !u2.IsCarried && !forceWait.Contains(u2.Id) && !done.Contains(u2.Id))
+                        if (u2.Army == Army && !u2.Acted && !u2.IsCarried && !forceWait.Contains(u2.Id) && !done.Contains(u2.Id) && !refill.Contains(u2.Id))
                             follow = Math.Max(follow, ctx2.Best(u2).Score);
                 }
                 float total = c.Score + Profile.LookaheadFollow * follow;
@@ -264,20 +379,54 @@ namespace FamiconWars.Core
             return k * 100000 - d.Price;
         }
 
-        bool ShouldResupply(GameState s)
+        /// <summary>
+        /// How badly a unit needs fuel or ammo: 0 fine, 1 should refill soon, 2 stranded (cannot move or
+        /// cannot fight). Ground vehicles keep two moves' worth of fuel in hand; aircraft turn back at 40%.
+        /// </summary>
+        internal static int Need(GameState s, UnitState u)
         {
-            int urgent = 0;
+            var d = s.Def(u);
+            if (d.CanSupply) return u.Fuel <= 0 ? 2 : u.Fuel <= d.Move * 2 ? 1 : 0;
+            int n = 0;
+            if (d.Ammo > 0) { if (u.Ammo <= 0) n = 2; else if (u.Ammo * 4 <= d.Ammo) n = 1; }
+            if (d.Domain == Domain.Ground)
+            {
+                if (u.Fuel <= 0) n = 2;
+                else if (u.Fuel <= Math.Max(d.Move * 2, d.Fuel * 3 / 10)) n = Math.Max(n, 1);
+            }
+            else if (d.Domain == Domain.Sea) { if (u.Fuel <= d.Fuel * 3 / 10) n = Math.Max(n, 1); }
+            else if (u.Fuel <= d.Fuel * 4 / 10) n = Math.Max(n, 1);
+            return n;
+        }
+
+        /// <summary>
+        /// 全補 refills every unit that has not acted yet, and uses up their action. So the units that need
+        /// it (low on fuel or ammo, or battered, standing on one of our facilities) are held back, the rest
+        /// of the army acts first, and 全補 comes last, when it touches only those. Units next to a supply
+        /// truck are left to the truck, which refills them without using them up.
+        /// </summary>
+        void PickRefill(GameState s)
+        {
+            refill.Clear();
+            resupplyConsidered = false;
+            if (s.ResupplyUsed[(int)Army]) return;
+            int cost = 0;
             foreach (var u in s.Units)
             {
                 if (u.Army != Army || u.Acted || u.IsCarried) continue;
                 var d = s.Def(u);
                 var t = s.TerrainAt(u.X, u.Y);
                 if (!(t.IsProperty && s.Owner[s.Index(u.X, u.Y)] == Army && t.Supplies == d.Domain)) continue;
-                if (u.Hp <= 60 || (d.Ammo > 0 && u.Ammo == 0) || (d.FuelPerPhase > 0 && u.Fuel < d.Fuel / 2)) urgent++;
+                int need = Need(s, u);
+                if (d.FuelPerPhase > 0 && u.Fuel < d.Fuel / 2) need = Math.Max(need, 1);
+                if (need == 0 && u.Hp > Profile.RepairAt) continue;
+                if (d.Capture > 0 && s.CapturingUnit[s.Index(u.X, u.Y)] == u.Id) continue;   // finishing a capture comes first
+                int c = (d.Fuel - u.Fuel) * u.Count + (d.Ammo - u.Ammo) * d.AmmoPrice * u.Count
+                        + ((Math.Min(100, u.Hp + s.Rules.ResupplyHp) + 9) / 10 - u.Count) * d.Price / 10;
+                if (cost + c > s.Funds[(int)Army]) continue;
+                cost += c;
+                refill.Add(u.Id);
             }
-            if (urgent == 0) return false;
-            if (RulesEngine.CheckResupply(s, out var targets, out var cost) != null) return false;
-            return urgent * 2 >= targets.Count && cost <= s.Funds[(int)Army];
         }
 
         // ================= production =================
@@ -293,7 +442,8 @@ namespace FamiconWars.Core
             {
                 var st = strategic.Value;
                 int skey = st.y * 4096 + st.x;
-                if (!productionTried.Contains(skey) && s.Funds[(int)Army] >= st.def.Price && RulesEngine.UnitCount(s, Army) < s.Rules.UnitLimit)
+                if (KeepForRefill(s, st.x, st.y) || (st.def.Domain == Domain.Air && AirFull(s))) strategic = null;
+                else if (!productionTried.Contains(skey) && s.Funds[(int)Army] >= st.def.Price && RulesEngine.UnitCount(s, Army) < s.Rules.UnitLimit)
                 {
                     productionTried.Add(skey);
                     strategic = null;
@@ -303,20 +453,56 @@ namespace FamiconWars.Core
             // blue scans from the far corner so that both armies try their facilities in the same order
             // relative to the front on a point-symmetric map
             bool rev = Army == Army.Blue;
+            // gunships: the airports choose before the factories spend the money
+            for (int pass = GunshipMode(s) ? 0 : 1; pass < 2; pass++)
             for (int yi = 0; yi < s.Height; yi++)
                 for (int xi = 0; xi < s.Width; xi++)
                 {
                     int y = rev ? s.Height - 1 - yi : yi, x = rev ? s.Width - 1 - xi : xi;
                     int key = y * 4096 + x;
                     if (productionTried.Contains(key)) continue;
+                    if (pass == 0 && s.TerrainAt(x, y).Produces != Domain.Air) continue;
                     var list = RulesEngine.ProducibleAt(s, Army, x, y);
                     if (list.Count == 0) continue;
                     productionTried.Add(key);
+                    if (AirFull(s)) { list = list.FindAll(d => d.Domain != Domain.Air); if (list.Count == 0) continue; }
+                    if (KeepForRefill(s, x, y)) continue;
                     if (RulesEngine.UnitCount(s, Army) >= s.Rules.UnitLimit) return null;
                     var pick = PickUnit(s, list, x, y);
                     if (pick != null) return new ProduceCommand { Army = Army, X = x, Y = y, UnitType = pick.Id };
                 }
             return null;
+        }
+
+        /// <summary>An airport or port is left empty while one of our aircraft or ships that is low on
+        /// fuel is coming home to it (a unit built there would block it for another day).</summary>
+        bool KeepForRefill(GameState s, int x, int y)
+        {
+            if (!Profile.Has(AiFeature.Fuel)) return false;
+            var t = s.TerrainAt(x, y);
+            if (t.Supplies == null || t.Supplies.Value == Domain.Ground) return false;
+            foreach (var u in s.Units)
+            {
+                if (u.Army != Army || u.IsCarried) continue;
+                var d = s.Def(u);
+                if (d.Domain != t.Supplies.Value || d.CanSupply) continue;
+                if (Need(s, u) == 0 && u.Hp > Profile.RepairAt) continue;
+                if (u.X == x && u.Y == y) continue;
+                if (Movement.Distance(u.X, u.Y, x, y) <= d.Move + 1) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Aircraft have to come back to an airport every few days; more than two per airport and
+        /// they queue up in the air until they crash.</summary>
+        bool AirFull(GameState s)
+        {
+            if (!Profile.Has(AiFeature.Fuel)) return false;
+            int air = 0, airports = 0;
+            foreach (var u in s.Units) if (u.Army == Army && s.Def(u).Domain == Domain.Air && s.Def(u).CargoCapacity == 0) air++;
+            for (int i = 0; i < s.Owner.Length; i++)
+                if (s.Owner[i] == Army && s.Data.Terrains[s.Terrain[i]].Supplies == Domain.Air) airports++;
+            return air >= Profile.AirPerAirport * airports;
         }
 
         int FreeFacilities(GameState s)
@@ -386,7 +572,8 @@ namespace FamiconWars.Core
                     else wgt *= Math.Max(0.3f, Math.Min(3f, (give + 1) / (take + 1)));
                 }
                 if (t.CargoCapacity > 0 && t.Domain != Domain.Air && !NeedTransport(s, t)) wgt *= 0.3f;
-                if (t.CanSupply && !NeedSupply(s)) wgt *= 0.2f;
+                if (t.CanSupply) { if (!NeedSupply(s)) wgt *= 0.2f; else wgt = Math.Max(wgt, 1.5f); }
+                wgt *= StyleFactor(s, t);
                 weights[k] = wgt;
                 sum += wgt;
             }
@@ -400,6 +587,20 @@ namespace FamiconWars.Core
             return aff[aff.Count - 1];
         }
 
+
+        /// <summary>How much this COM's 戦法 likes a unit type (production weight factor).</summary>
+        float StyleFactor(GameState s, UnitDef t)
+        {
+            if (t.RangeMax <= 0) return 1f;                                  // trucks: by need only
+            if (t.Domain != Domain.Ground) return 1f;
+            // near the unit limit: each slot is worth more, so heavier units
+            if (Profile.SlotMerge && RulesEngine.UnitCount(s, Army) >= 40 && t.RangeMax > 0 && t.Capture == 0)
+                return (t.IsIndirect ? Profile.ProdIndirect : Profile.ProdDirect) * (float)Math.Pow(t.Price / 6000.0, Profile.PricePref + 1.5f);
+            if (t.Capture > 0) return Profile.ProdFoot * (t.Capture == 1 && s.Day >= 6 ? Profile.MechPref : 1f);
+            float price = (float)Math.Pow(t.Price / 6000.0, Profile.PricePref);
+            if (t.IsIndirect) return Profile.ProdIndirect * price;
+            return t.CargoCapacity > 0 ? 1f : Profile.ProdDirect * price;
+        }
 
         /// <summary>
         /// Production with discipline. Infantry fight only adjacent tiles, so past the capturing phase a
@@ -432,10 +633,20 @@ namespace FamiconWars.Core
             // that no foot soldier of ours is nearer to, and that the enemy is not standing on or right next
             // to, gets one capturer, at any stage of the game and regardless of how full the front is.
             if (!needInf && !lateCapThisPhase && Profile.EcoLateCapRange > 0 && LateCaptureTarget(s, fx, fy)) { needInf = true; lateCapThisPhase = true; }
+            // finishing off: only infantry can take the base, so always have a few
+            if (!needInf && pushNow0(s) >= 0.5f && capturers < 3) needInf = true;
+            // ...and keep the last unit slots for them: a full army without infantry cannot take the base
+            if (pushNow0(s) >= 0.5f && capturers < 3 && myCount >= s.Rules.UnitLimit - 3)
+            {
+                aff = aff.FindAll(d => d.Capture >= 2);
+                if (aff.Count == 0) return null;
+                needInf = true;
+            }
 
             // ---- how scarce is a unit slot? (unit limit headroom, and how jammed the front is) ----
             float pSlots = Clamp01((myCount - s.Rules.UnitLimit * Profile.EcoSlotFrom) / (s.Rules.UnitLimit * 0.5f));
             float pFront = FrontCongestion(s);
+            float pushNow = pushNow0(s);
             float press = Math.Max(pSlots, pFront);
             Profile.LastPress = press;
 
@@ -450,7 +661,13 @@ namespace FamiconWars.Core
             // more HP and takes less (tanks, guns, aircraft) outweighs a cheap one.
             float Weight(UnitDef t)
             {
-                float bw = BaseWeight(t);
+                // a landing ship is bought for a crossing only it can make, never as a fighting ship
+                if (t.Domain == Domain.Sea && t.CargoCapacity > 0 && !SeaLiftUseful(s, t)) return 0f;
+                float bw = BaseWeight(t) * StyleFactor(s, t);
+                if (t.Domain == Domain.Air && t.CargoCapacity > 0 && t.RangeMax > 0 && GunshipMode(s)) bw = Math.Max(bw, 3f);   // gunships
+                // finishing off needs units that move and shoot: guns only hold ground
+                if (pushNow > 0 && t.RangeMax > 0 && t.Domain == Domain.Ground && t.Capture == 0)
+                    bw *= t.IsIndirect ? 1f - 0.7f * pushNow : 1f + pushNow;
                 if (!Profile.EcoSlotModel || press <= 0 || (t.Capture >= 2 && needInf)) return bw;
                 bw *= (float)Math.Pow(SlotEff(t), press * Profile.EcoSlotGain);
                 // truly jammed (front packed, or only a few slots left): another rifle squad cannot even reach a fight
@@ -487,7 +704,7 @@ namespace FamiconWars.Core
                 if (t.CargoCapacity > 0 && t.Domain == Domain.Ground && Profile.TransportTactics && EarlyTruck(s, t, fx, fy)) return aff.Count * 1.2f;
                 if (t.CargoCapacity > 0 && t.Domain != Domain.Air && !NeedTransport(s, t)) wgt *= 0.2f;
                 if (t.CargoCapacity > 0 && t.Domain == Domain.Air && !needInf) wgt *= 0.3f;
-                if (t.CanSupply && !NeedSupply(s)) wgt *= 0.1f;
+                if (t.CanSupply) { if (!NeedSupply(s)) wgt *= 0.1f; else wgt = Math.Max(wgt, 1.5f); }
                 return wgt;
             }
 
@@ -546,7 +763,6 @@ namespace FamiconWars.Core
             if (RulesEngine.UnitCount(s, Army) >= s.Rules.UnitLimit - 1) return null;
             if (s.Day < 6) return null;            // the capture race comes first
             int n = s.Width * s.Height;
-
             // how many days our ground army needs to reach each tile (from its units and factories)
             var groundDays = new float[n];
             for (int i = 0; i < n; i++) groundDays[i] = 99;
@@ -617,7 +833,8 @@ namespace FamiconWars.Core
                         if (sc > bestSc) { bestSc = sc; best = (d, x, y); bestTargets = targets; }
                     }
                 }
-            if (best == null || bestSc < 0.8f) return null;
+            if (best == null) return null;
+            if (bestSc < 0.8f) return null;
             // a few of them, as many as the good targets warrant
             if (ownAirSea >= Math.Min(3, 1 + bestTargets / 4)) return null;
             return best;
@@ -646,12 +863,26 @@ namespace FamiconWars.Core
                         var od = s.Def(o);
                         if (od.RangeMax <= 0 || s.Data.BaseDamage(od, d) < 0) continue;
                         int od2 = Movement.Distance(o.X, o.Y, x, y);
-                        if (od.IsIndirect ? od2 >= od.RangeMin && od2 <= od.RangeMax : od2 <= od.Move + od.RangeMax) threats++;
+                        if (od.IsIndirect ? od2 >= od.RangeMin && od2 <= od.RangeMax : od2 <= od.Move + od.RangeMax && CanCloseIn(s, o, od, x, y)) threats++;
                     }
                     float w = threats == 0 ? 1f : 0.3f / threats;
                     if (w > bestW) bestW = w;
                 }
             return bestW;
+        }
+
+        /// <summary>Can a direct-fire unit get next to tile (x, y)? Land units only from a neighbouring tile
+        /// they can stand on (a ship out at sea is safe from tanks on the far shore).</summary>
+        static bool CanCloseIn(GameState s, UnitState o, UnitDef od, int x, int y)
+        {
+            if (od.Domain != Domain.Ground) return true;
+            for (int k = 0; k < 4; k++)
+            {
+                int nx = x + (k == 0 ? 1 : k == 1 ? -1 : 0), ny = y + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                if (!s.InBounds(nx, ny) || s.TerrainAt(nx, ny).Cost[(int)od.MoveClass] < 0) continue;
+                if (Movement.Distance(o.X, o.Y, nx, ny) <= od.Move) return true;
+            }
+            return false;
         }
 
         /// <summary>Movement cost from the given tiles over terrain only (units ignored).</summary>
@@ -761,6 +992,21 @@ namespace FamiconWars.Core
             return far >= 3;
         }
 
+        /// <summary>A landing ship has a job: the enemy base is only reachable by sea, or a property we do not
+        /// own is out of reach on foot (an island) and we have no landing ship yet.</summary>
+        bool SeaLiftUseful(GameState s, UnitDef t)
+        {
+            if (NeedTransport(s, t)) return true;
+            int hq = -1;
+            foreach (var u in s.Units) if (u.Army == Army && s.Def(u).CargoCapacity > 0 && s.Def(u).Domain == Domain.Sea) return false;
+            for (int i = 0; i < s.Owner.Length; i++) if (s.Owner[i] == Army && s.Data.Terrains[s.Terrain[i]].Id == "HQ") hq = i;
+            if (hq < 0) return false;
+            var foot = TerrainCost(s, MoveClass.Foot, new List<int> { hq });
+            for (int i = 0; i < s.Owner.Length; i++)
+                if (s.Data.Terrains[s.Terrain[i]].IsProperty && s.Owner[i] != Army && foot[i] >= Inf) return true;
+            return false;
+        }
+
         bool NeedTransport(GameState s, UnitDef t)
         {
             foreach (var u in s.Units) if (u.Army == Army && s.Def(u).CargoCapacity > 0 && s.Def(u).Domain == t.Domain) return false;
@@ -777,19 +1023,147 @@ namespace FamiconWars.Core
             return false;
         }
 
+        /// <summary>A supply truck is worth buying when several ground units run low and the trucks we
+        /// have cannot keep up (one truck looks after about four needy units).</summary>
+        /// <summary>0..1: how stuck this army's money is (near the unit limit, funds piling up past what
+        /// a couple of replacements cost).</summary>
+        internal float Surplus(GameState s)
+        {
+            int count = RulesEngine.UnitCount(s, Army);
+            int room = s.Rules.UnitLimit - count;
+            if (room > 6) return 0f;
+            float money = Clamp01((s.Funds[(int)Army] - 12000f) / 24000f);
+            return money * Clamp01((7 - room) / 4f);
+        }
+
+        float pushNow0(GameState s)
+        {
+            float p = Math.Max(s.Day >= 8 ? Profile.EarlyPush : 0f, Profile.BreakDeadlock ? Math.Max(Surplus(s), Lead(s)) : 0f);
+            if (Profile.Phases) p = Math.Max(p, Late(s));
+            return p;
+        }
+
+        // ---- phases of the game: opening (the capture race), middle game (each 戦法's own plan),
+        //      end game (everything goes for the enemy base) ----
+        int gunKey = -1; bool gunMode;
+        internal int UnitCountNow;                 // our units at the start of the current command (set by Ctx)
+
+        /// <summary>
+        /// 精鋭 against a foot army: when at least half of the enemy are infantry / mech and under one in ten of
+        /// its units can really hurt a helicopter, armed helicopters (cheap, fast, out of reach of the guns
+        /// and barely scratched by foot soldiers) become fighting units.
+        /// </summary>
+        internal bool GunshipMode(GameState s)
+        {
+            if (!Profile.Gunships) return false;
+            int key = s.Day * 2 + (int)s.Active;
+            if (gunKey == key) return gunMode;
+            gunKey = key; gunMode = false;
+            var heli = s.Data.Units.Find(d => d.Domain == Domain.Air && d.CargoCapacity > 0 && d.RangeMax > 0);
+            if (heli == null) return false;
+            int all = 0, foot = 0, aa = 0;
+            foreach (var u in s.Units)
+            {
+                if (u.Army == Army || u.IsCarried) continue;
+                var d = s.Def(u);
+                all++;
+                if (d.Capture > 0) foot++;
+                if (s.Data.BaseDamage(d, heli) >= 40) aa++;
+            }
+            gunMode = all >= 6 && foot * 5 >= all * 2 && aa * 100 < all * 15;
+            return gunMode;
+        }
+
+        int hqDistance = -1;
+        int focusKey = -1, focusTile = -1;
+
+        /// <summary>
+        /// Middle game: one enemy property to take this phase, where the army masses instead of spreading
+        /// along the whole front. The nearest one to our fighting units, avoiding the most heavily held.
+        /// </summary>
+        internal int FocusTile(GameState s)
+        {
+            int key = s.Day * 2 + (int)s.Active;
+            if (focusKey == key) return focusTile;
+            focusKey = key; focusTile = -1;
+            if (!Profile.Focus || s.Day < 8) return -1;
+            var src = new List<int>();
+            foreach (var u in s.Units)
+            {
+                if (u.Army != Army || u.IsCarried) continue;
+                var d = s.Def(u);
+                if (d.Domain == Domain.Ground && d.RangeMax > 0 && !d.IsIndirect && d.Capture == 0) src.Add(s.Index(u.X, u.Y));
+            }
+            if (src.Count == 0) return -1;
+            var dist = TerrainCost(s, MoveClass.Vehicle, src);
+            float best = float.MaxValue;
+            for (int i = 0; i < s.Owner.Length; i++)
+            {
+                var t = s.Data.Terrains[s.Terrain[i]];
+                if (!t.IsProperty || s.Owner[i] == Army || s.Owner[i] == Army.None || dist[i] >= Inf) continue;
+                int x = i % s.Width, y = i / s.Width;
+                float held = 0;
+                foreach (var e in s.Units)
+                    if (e.Army != Army && !e.IsCarried && Movement.Distance(e.X, e.Y, x, y) <= 3) held += s.Def(e).Price * e.Hp / 100f;
+                float sc = dist[i] * 2000f + held * 0.5f - (t.Produces != null ? 3000f : 0f);
+                if (sc < best) { best = sc; focusTile = i; }
+            }
+            return focusTile;
+        }
+
+        /// <summary>Foot distance between the two bases (the size of the battlefield).</summary>
+        int HqDistance(GameState s)
+        {
+            if (hqDistance >= 0) return hqDistance;
+            int mine = -1, theirs = -1;
+            for (int i = 0; i < s.Owner.Length; i++)
+                if (s.Data.Terrains[s.Terrain[i]].Id == "HQ") { if (s.Owner[i] == Army) mine = i; else if (s.Owner[i] != Army.None) theirs = i; }
+            hqDistance = s.Width + s.Height;
+            if (mine >= 0 && theirs >= 0)
+            {
+                var c = TerrainCost(s, MoveClass.Foot, new List<int> { mine });
+                if (c[theirs] < Inf) hqDistance = c[theirs];
+            }
+            return hqDistance;
+        }
+
+        /// <summary>0..1: how far into the end game we are. It starts when the armies have had time to meet
+        /// and fight it out (later on a bigger map) and is complete ten days later.</summary>
+        internal float Late(GameState s)
+        {
+            int start = Profile.LateBase + HqDistance(s) / 2;
+            return Clamp01((s.Day - start) / (float)Math.Max(1, Profile.LateSpan));
+        }
+
+        /// <summary>0..1: how far ahead in army value we are (0 below 1.2x, 1 from 1.6x).</summary>
+        internal float Lead(GameState s)
+        {
+            long mine = 0, theirs = 0;
+            foreach (var u in s.Units)
+            {
+                long v = (long)s.Def(u).Price * u.Hp / 100;
+                if (u.Army == Army) mine += v; else theirs += v;
+            }
+            // money in the bank is an army about to appear (a COM saving up is not weak)
+            mine += s.Funds[(int)Army]; theirs += s.Funds[1 - (int)Army];
+            if (mine <= 0) return 0f;
+            float ratio = theirs <= 0 ? 9f : mine / (float)theirs;
+            return Clamp01((ratio - 1.2f) / 0.4f);
+        }
+
         bool NeedSupply(GameState s)
         {
-            int ground = 0; bool low = false;
+            int ground = 0, needy = 0, trucks = 0;
             foreach (var u in s.Units)
             {
                 if (u.Army != Army) continue;
                 var d = s.Def(u);
-                if (d.CanSupply) return false;
+                if (d.CanSupply) { trucks++; continue; }
                 if (d.Domain != Domain.Ground) continue;
                 ground++;
-                if ((d.Ammo > 0 && u.Ammo <= 1) || u.Fuel < d.Fuel / 4) low = true;
+                if (Need(s, u) > 0) needy++;
             }
-            return ground >= 6 && low;
+            return ground >= 5 && needy >= 2 && trucks * 4 < needy && trucks < 3;
         }
 
         // ================= evaluation context =================
@@ -799,6 +1173,9 @@ namespace FamiconWars.Core
             readonly GameState s;
             readonly AiPlayer ai;
             readonly AiProfile p;
+            readonly float wLoss, wThreat, wAdvance, wTerrain;
+            readonly float hold;                       // 0..1: fighting units keep to our half of the map (holding a line in the middle)   // the profile's weights, eased toward trading in a deadlock
+            readonly float push;                       // 0..1: time to finish the enemy off (deadlock or a clear lead)
             readonly Army me, foe;
             readonly int w;
             List<(UnitState e, HashSet<int> tiles)> enemyReach;
@@ -810,6 +1187,24 @@ namespace FamiconWars.Core
             public Ctx(GameState s, AiPlayer ai)
             {
                 this.s = s; this.ai = ai; p = ai.Profile; me = ai.Army; foe = ai.Foe; w = s.Width;
+                // Deadlock: at the unit limit with money nobody can spend, a lost unit is replaced the same
+                // day, so a trade costs far less than its price. Fight instead of holding still.
+                // A clear lead (well ahead in army value) is the other reason: stop trading blows at the front
+                // and go for the base, standing on the factories next to it so that nothing new comes out.
+                push = ai.pushNow0(s);
+                ai.UnitCountNow = RulesEngine.UnitCount(s, me);
+                wLoss = p.WLoss * (1f - 0.5f * push);
+                wThreat = p.WThreat * (1f - 0.6f * push);
+                wAdvance = p.WAdvance * (1f + 0.8f * push);
+                wTerrain = p.WTerrain;
+                hold = 0f;
+                if (p.HoldFromDay > 0 && push < 0.5f)
+                {
+                    // 物量: forward early, then hold the line
+                    if (s.Day < p.HoldFromDay) wAdvance *= 1.3f;
+                    else if (EnemyPushing()) { hold = 1f; wThreat *= 0.8f; wTerrain *= 2f; }
+                    // (with the enemy not coming, it advances like anyone else)
+                }
                 for (int i = 0; i < s.Owner.Length; i++)
                     if (s.Owner[i] == me && s.Data.Terrains[s.Terrain[i]].Id == "HQ") OwnHq = i;
                 if (OwnHq >= 0 && p.Has(AiFeature.Guard))
@@ -975,6 +1370,11 @@ namespace FamiconWars.Core
                             float jc = JoinCaptureScore(u, d, o, i);
                             if (jc > 0) emit(Cmd(u, x, y, UnitAction.Join), jc - leave + Positional(u, d, start, i, kv.Value, Math.Min(100, u.Hp + o.Hp)) * 0.5f);
                             continue;
+                        }
+                        else if (p.SlotMerge && ai.UnitCountNow >= 40 && u.Hp < 100 && o.Hp < 100 && u.Hp + o.Hp <= 120)
+                        {
+                            // near the unit limit: two battered units in one slot, the other slot for a heavy unit
+                            emit(Cmd(u, x, y, UnitAction.Join), 450 - leave + Positional(u, d, start, i, kv.Value, Math.Min(100, u.Hp + o.Hp)) * 0.5f);
                         }
                         else if (u.Hp <= 40 && u.Hp + o.Hp <= 110) emit(Cmd(u, x, y, UnitAction.Join), 300 - leave + Positional(u, d, start, i, kv.Value, o.Hp) * 0.5f);
                         else if (p.Has(AiFeature.Formation) && u.Hp <= 70 && o.Hp < 100 && u.Hp + o.Hp <= 110)
@@ -1163,21 +1563,60 @@ namespace FamiconWars.Core
                 {
                     var dm = DistFor(u);
                     int a = dm[start], b = dm[dest];
-                    if (a < Inf && b < Inf) sc += p.WAdvance * 450f * (a - b) / Math.Max(1, d.Move);
+                    if (a < Inf && b < Inf) sc += wAdvance * 450f * (a - b) / Math.Max(1, d.Move);
                     if (d.IsIndirect && b < d.RangeMin && dest != start) sc -= 300;
                 }
                 var t = s.TerrainAt(x, y);
                 if (p.Has(AiFeature.Terrain) && d.Domain != Domain.Air)
-                    sc += p.WTerrain * t.DefenseFor(d) / 100f * d.Price * 0.2f * hp / 100f;
-                if (p.Has(AiFeature.Threat)) sc -= p.WThreat * Threat(u, x, y, hp);
-                if (p.Has(AiFeature.Fuel) && d.FuelPerPhase > 0)
+                    sc += wTerrain * t.DefenseFor(d) / 100f * d.Price * 0.2f * hp / 100f;
+                if (p.Has(AiFeature.Threat)) sc -= wThreat * Threat(u, x, y, hp);
+                if (p.Has(AiFeature.Fuel))
                 {
                     int left = u.Fuel - moveCost;
-                    int home = Dist(MoveClass.Air, "airport")[dest];
-                    if (home >= Inf) home = 99;
-                    if (left - d.FuelPerPhase * 2 < home) sc -= d.Price * 0.6f;
+                    bool atSupply = SupplyTile(u, d, dest);
+                    if (d.FuelPerPhase > 0 || d.Domain == Domain.Sea)
+                    {
+                        // aircraft and ships are lost at 0 fuel: never fly or sail beyond the way home
+                        int home = Dist(d.MoveClass, "supply:" + (int)d.Domain)[dest];
+                        if (home >= Inf) home = 99;
+                        // fuel it takes to get home from there: the way itself plus the upkeep of every phase on it
+                        int trip = home + d.FuelPerPhase * (home / Math.Max(1, d.Move) + 1);
+                        if (!atSupply && left < home) sc -= d.Price * 1.0f;
+                        else if (!atSupply && left < trip) sc -= d.Price * 0.6f;
+                    }
+                    else if (d.Domain == Domain.Ground && dest != start && !atSupply)
+                    {
+                        // a vehicle that runs dry becomes a sitting duck: keep enough fuel to reach supply
+                        if (left <= 0) sc -= d.Price * (d.CanSupply ? 2f : 0.5f);   // nobody refills a truck but a city
+                        else if (left < d.Move * 2)
+                        {
+                            int sd = Dist(d.MoveClass, (d.CanSupply ? "supplyfac:" : "supply:") + (int)d.Domain)[dest];
+                            if (sd > left) sc -= d.Price * 0.2f;
+                        }
+                    }
+                    int need = NeedAt(u);
+                    if (need > 0 && atSupply)
+                        sc += d.Price * (need >= 2 ? 0.4f : 0.2f);         // wait here for 全補 or the truck
+                    if (d.CanSupply)
+                    {
+                        // a truck parks next to units that run low (it refills them now or next phase)
+                        int[] qx = { 1, -1, 0, 0 }, qy = { 0, 0, 1, -1 };
+                        for (int k = 0; k < 4; k++)
+                        {
+                            var o = s.UnitAt(x + qx[k], y + qy[k]);
+                            if (o == null || o.Army != me || o.Id == u.Id || s.Def(o).Domain != Domain.Ground) continue;
+                            int on = Need(s, o);
+                            if (on > 0) sc += s.Def(o).Price * (on >= 2 ? 0.25f : 0.12f);
+                        }
+                    }
                 }
-                if (t.Produces != null && s.Owner[dest] == me && RulesEngine.InProductionRange(s, me, x, y)) sc -= 3000;
+                if (t.Produces != null && s.Owner[dest] == me && RulesEngine.InProductionRange(s, me, x, y))
+                {
+                    // keep production sites free, except for a unit that has to refill there (an aircraft's
+                    // only airport is usually next to the HQ)
+                    bool refill = t.Supplies == d.Domain && (Need(s, u) > 0 || (hp <= p.RepairAt && (d.Domain == Domain.Ground || !OthersNeedRefill(u, d, dest))));
+                    if (!refill) sc -= 3000;
+                }
                 if (p.TransportTactics && d.CargoCapacity > 0 && d.Domain == Domain.Ground && u.Cargo.Count == 0)
                 {
                     // a cheap truck standing between the enemy and a capturing squad buys the capture a day
@@ -1193,7 +1632,7 @@ namespace FamiconWars.Core
                         if (fd[dest] < fd[s.Index(nx, ny)]) sc += 400;   // on the enemy's side of it
                     }
                 }
-                if (p.Has(AiFeature.Formation) && hp <= 60 && t.IsProperty && s.Owner[dest] == me && t.Supplies == d.Domain)
+                if (p.Has(AiFeature.Formation) && push < 0.5f && hp <= p.RepairAt && t.IsProperty && s.Owner[dest] == me && t.Supplies == d.Domain)
                     sc += d.Price * 0.25f * (100 - hp) / 100f;   // battered units head for a city to be repaired
                 // don't walk out of a barricade that is keeping an enemy off one of our capturing squads
                 if (p.Has(AiFeature.Formation) && p.KeepBarricade && d.Domain == Domain.Ground && dest != start)
@@ -1211,6 +1650,62 @@ namespace FamiconWars.Core
                     }
                 }
                 if (hqDanger && dest == OwnHq) sc += 4000;
+                if (hold > 0 && d.Capture == 0 && d.Domain == Domain.Ground && dest != start)
+                {
+                    // holding the line: the middle of the map, not beyond it
+                    int dOwn = Dist(MoveClass.Foot, "ownhq")[dest], dFoe = Dist(MoveClass.Foot, "foehq")[dest];
+                    if (dOwn < Inf && dFoe < Inf && dFoe < dOwn - 1) sc -= hold * d.Price * 0.4f;
+                }
+                if (hold > 0 && p.KillZone && d.Domain == Domain.Ground)
+                {
+                    if (d.IsIndirect)
+                    {
+                        // a gun covers the empty tiles next to our front units: whoever steps up to the line
+                        // gets shelled next phase
+                        int cover = 0;
+                        foreach (var f in s.Units)
+                        {
+                            if (f.Army != me || f.IsCarried || f.Id == u.Id) continue;
+                            var fd = s.Def(f);
+                            if (fd.IsIndirect || fd.Domain != Domain.Ground || fd.CanSupply) continue;
+                            if (Movement.Distance(f.X, f.Y, x, y) > d.RangeMax + 1) continue;
+                            for (int k = 0; k < 4; k++)
+                            {
+                                int nx = f.X + (k == 0 ? 1 : k == 1 ? -1 : 0), ny = f.Y + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                                if (!s.InBounds(nx, ny) || s.UnitAt(nx, ny) != null) continue;
+                                int r = Movement.Distance(nx, ny, x, y);
+                                if (r >= d.RangeMin && r <= d.RangeMax) cover++;
+                            }
+                        }
+                        sc += hold * Math.Min(cover, 8) * 150f;
+                    }
+                    else if (d.RangeMax > 0)
+                    {
+                        // a front unit stands where our guns can shell whoever attacks it
+                        foreach (var g in s.Units)
+                        {
+                            if (g.Army != me || g.IsCarried || g.Id == u.Id || !s.Def(g).IsIndirect) continue;
+                            int r = Movement.Distance(g.X, g.Y, x, y);
+                            if (r >= s.Def(g).RangeMin - 1 && r <= s.Def(g).RangeMax - 1) { sc += hold * d.Price * 0.15f; break; }
+                        }
+                    }
+                }
+                if (hold > 0 && d.Domain == Domain.Ground && d.Capture == 0)
+                {
+                    // a line has no gaps: stand next to each other (and guns stand behind someone)
+                    int nb = 0;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        var o = s.UnitAt(x + (k == 0 ? 1 : k == 1 ? -1 : 0), y + (k == 2 ? 1 : k == 3 ? -1 : 0));
+                        if (o != null && o.Army == me && o.Id != u.Id) nb++;
+                    }
+                    sc += hold * Math.Min(nb, 2) * d.Price * 0.05f;
+                }
+                if (push > 0 && d.Domain == Domain.Ground && s.Owner[dest] == foe && t.Produces != null && RulesEngine.InProductionRange(s, foe, x, y))
+                {
+                    if (t.Id != "HQ") sc += 2500f * push;              // nothing can be built on a factory we stand on
+                    else if (d.Capture < 2) sc -= 2500f * push;        // and the base itself is for the infantry to take
+                }
                 if (p.Noise > 0) sc += ai.rng.Range(0, p.Noise);
                 return sc;
             }
@@ -1220,6 +1715,20 @@ namespace FamiconWars.Core
             /// also eats our counter-fire: the threat is (our loss) - (their loss), strongest attacker in full,
             /// the second at half (each enemy attacks only once and has other targets).
             /// </summary>
+            /// <summary>Is the enemy coming at us: three or more of its fighting units in our half of the map?</summary>
+            bool EnemyPushing()
+            {
+                var own = Dist(MoveClass.Foot, "ownhq"); var theirs = Dist(MoveClass.Foot, "foehq");
+                int n = 0;
+                foreach (var e in s.Units)
+                {
+                    if (e.Army != foe || e.IsCarried || s.Def(e).RangeMax <= 0) continue;
+                    int i = s.Index(e.X, e.Y);
+                    if (own[i] < Inf && theirs[i] < Inf && own[i] <= theirs[i] && ++n >= 3) return true;
+                }
+                return false;
+            }
+
             float Threat(UnitState u, int x, int y, int hp)
             {
                 int idx = s.Index(x, y);
@@ -1291,9 +1800,23 @@ namespace FamiconWars.Core
                 }
                 if (hqDanger && s.Def(t).Capture >= 2 && OwnHq >= 0 && Movement.Distance(t.X, t.Y, OwnHq % w, OwnHq / w) <= s.Def(t).Move + 1)
                     sc += 3000f * dmg / Math.Max(1, t.Hp);
-                sc -= p.WLoss * cdmg / 100f * Value(u);
+                if (hold > 0)
+                {
+                    // holding a line: whatever has come into our half is caught and finished off there
+                    int dOwn = Dist(MoveClass.Foot, "ownhq")[ti], dFoe = Dist(MoveClass.Foot, "foehq")[ti];
+                    if (dOwn < Inf && dFoe < Inf && dOwn <= dFoe + 1)
+                        sc += hold * Value(t) * (0.4f * Math.Min(1f, dmg / (float)Math.Max(1, t.Hp)) + (dmg >= t.Hp ? 0.3f : 0f));
+                }
+                if (push > 0)
+                {
+                    // finishing off: clear the enemy base and the factories next to it
+                    var tt = s.Data.Terrains[s.Terrain[ti]];
+                    if (s.Owner[ti] == foe && tt.Produces != null && RulesEngine.InProductionRange(s, foe, t.X, t.Y))
+                        sc += 2000f * push * Math.Min(1f, dmg / (float)Math.Max(1, t.Hp)) + (dmg >= t.Hp ? 1000f * push : 0);
+                }
+                sc -= wLoss * cdmg / 100f * Value(u);
                 if (cdmg >= u.Hp) sc -= 0.35f * Value(u);
-                if (p.FocusFire && dmg < t.Hp)
+                if ((p.FocusFire || push >= 0.5f) && dmg < t.Hp)
                 {
                     // the others can finish what this hit starts: a dead unit fires back at no one next phase
                     float others = AllyPotential(t) - OwnShare(u, t);
@@ -1430,8 +1953,57 @@ namespace FamiconWars.Core
                 float sc = b < Inf && b <= 2 * s.Def(cargo).Move ? 1200 : -800;
                 var t = s.Data.Terrains[s.Terrain[drop]];
                 if (t.IsProperty && s.Owner[drop] != me) sc += 1500;
-                if (p.Has(AiFeature.Threat)) sc -= p.WThreat * Threat(cargo, drop % w, drop / w, cargo.Hp);
+                if (p.Has(AiFeature.Threat)) sc -= wThreat * Threat(cargo, drop % w, drop / w, cargo.Hp);
                 return sc;
+            }
+
+            /// <summary>Would a unit standing on tile i be refilled next phase (own facility of its domain, or
+            /// a land tile next to one of our trucks)?</summary>
+            bool SupplyTile(UnitState u, UnitDef d, int i)
+            {
+                var t = s.Data.Terrains[s.Terrain[i]];
+                if (t.IsProperty && s.Owner[i] == me && t.Supplies == d.Domain) return true;
+                if (d.Domain != Domain.Ground) return false;
+                int x = i % w, y = i / w;
+                for (int k = 0; k < 4; k++)
+                {
+                    var o = s.UnitAt(x + (k == 0 ? 1 : k == 1 ? -1 : 0), y + (k == 2 ? 1 : k == 3 ? -1 : 0));
+                    if (o != null && o.Army == me && o.Id != u.Id && !o.IsCarried && s.Def(o).CanSupply) return true;
+                }
+                return false;
+            }
+
+            /// <summary>Need(), and for aircraft and ships also "the way home is getting long": turn back
+            /// while there is still fuel for the trip plus a move of slack.</summary>
+            int NeedAt(UnitState u)
+            {
+                int n = AiPlayer.Need(s, u);
+                if (n > 0) return n;
+                var d = s.Def(u);
+                if (p.CarefulSupply && d.Capture == 0 && !d.CanSupply)
+                {
+                    // 精鋭: refill at half ammo, and bring valuable units back for repairs before they are lost
+                    if (d.Ammo > 0 && u.Ammo * 2 <= d.Ammo) return 1;
+                    if (d.Price >= 6000 && u.Hp <= 50) return 1;
+                }
+                if (d.Domain == Domain.Ground || d.CanSupply) return 0;
+                int home = Dist(d.MoveClass, "supply:" + (int)d.Domain)[s.Index(u.X, u.Y)];
+                if (home >= Inf) return 0;
+                int trip = home + d.FuelPerPhase * (home / Math.Max(1, d.Move) + 2) + d.Move;
+                return u.Fuel <= trip ? 1 : 0;
+            }
+
+            /// <summary>Another of our units of the same kind (aircraft or ship) is running low near this tile.</summary>
+            bool OthersNeedRefill(UnitState u, UnitDef d, int at)
+            {
+                foreach (var o in s.Units)
+                {
+                    if (o.Army != me || o.IsCarried || o.Id == u.Id) continue;
+                    var od = s.Def(o);
+                    if (od.Domain != d.Domain || AiPlayer.Need(s, o) == 0) continue;
+                    if (Movement.Distance(o.X, o.Y, at % w, at / w) <= od.Move * 2) return true;
+                }
+                return false;
             }
 
             float SupplyScore(UnitState truck, int x, int y)
@@ -1457,9 +2029,24 @@ namespace FamiconWars.Core
             int[] DistFor(UnitState u)
             {
                 var d = s.Def(u);
+                // low on fuel or ammo: head for a refill first (aircraft even with passengers: they crash at 0)
+                if (p.Has(AiFeature.Fuel) && d.Capture == 0 && (d.CargoCapacity == 0 || u.Cargo.Count == 0 || d.Domain == Domain.Air) && NeedAt(u) > 0)
+                {
+                    // (a truck that runs low itself goes to a city; it cannot refill itself)
+                    string key = (d.CanSupply ? "supplyfac:" : "supply:") + (int)d.Domain;
+                    var sd = Dist(d.MoveClass, key);
+                    if (!emptyDist.Contains(d.MoveClass + key)) return sd;
+                }
+                if (d.CargoCapacity > 0 && d.Domain == Domain.Air && d.RangeMax > 0 && u.Cargo.Count == 0 && ai.GunshipMode(s))
+                    return Dist(d.MoveClass, "enemy:" + d.Index);          // gunship: goes hunting
                 if (d.CargoCapacity > 0)
                 {
-                    if (u.Cargo.Count > 0) return Dist(d.MoveClass, "cap2");
+                    if (u.Cargo.Count > 0)
+                    {
+                        // end game: the passengers go to the enemy base
+                        if (push >= 0.6f) { var hq = Dist(d.MoveClass, "foehq"); if (hq[s.Index(u.X, u.Y)] < Inf) return hq; }
+                        return Dist(d.MoveClass, "cap2");
+                    }
                     var pick = Dist(d.MoveClass, "pickup");
                     if (!emptyDist.Contains(d.MoveClass + "pickup")) return pick;
                     if (p.TransportTactics && d.Domain == Domain.Ground)
@@ -1469,12 +2056,28 @@ namespace FamiconWars.Core
                     }
                     return Dist(d.MoveClass, "own");
                 }
+                if (d.Capture >= 2 && push >= 0.6f && s.CapturingUnit[s.Index(u.X, u.Y)] != u.Id)
+                {
+                    // end game: infantry (the only ones who can take a base) head for the enemy base
+                    var hq = Dist(MoveClass.Foot, "foehq");
+                    if (hq[s.Index(u.X, u.Y)] < Inf) return hq;
+                }
                 if (d.Capture > 0) return Dist(MoveClass.Foot, d.Capture >= 2 ? "cap2" : "cap1");
-                if (p.Has(AiFeature.Fuel) && d.FuelPerPhase > 0 && u.Fuel <= d.Fuel * 0.4f) return Dist(d.MoveClass, "airport");
                 if (d.CanSupply)
                 {
                     var n = Dist(d.MoveClass, "needy");
                     return emptyDist.Contains(d.MoveClass + "needy") ? Dist(d.MoveClass, "own") : n;
+                }
+                if (push >= 0.5f && d.Domain == Domain.Ground && d.RangeMax > 0 && !d.IsIndirect)
+                {
+                    var fp = Dist(d.MoveClass, "foeprod");
+                    if (!emptyDist.Contains(d.MoveClass + "foeprod") && fp[s.Index(u.X, u.Y)] < Inf) return fp;
+                }
+                // middle game: mass on the property picked for this phase
+                if (p.Focus && push < 0.5f && d.Domain == Domain.Ground && d.RangeMax > 0 && !d.IsIndirect && d.Capture == 0 && ai.FocusTile(s) >= 0)
+                {
+                    var fo = Dist(d.MoveClass, "focus");
+                    if (fo[s.Index(u.X, u.Y)] < Inf) return fo;
                 }
                 return Dist(d.MoveClass, "enemy:" + d.Index);
             }
@@ -1491,10 +2094,53 @@ namespace FamiconWars.Core
                         if (t.IsProperty && s.Owner[i] != me && (key == "cap2" || t.Id != "HQ")) src.Add(i);
                     }
                 }
-                else if (key == "airport")
+                else if (key.StartsWith("supply:") || key.StartsWith("supplyfac:"))
+                {
+                    // where a unit of this domain gets refilled: our own supplying facilities (not the
+                    // production sites next to the HQ, which must stay free) and, on land, next to a truck
+                    var dom = (Domain)int.Parse(key.Substring(key.IndexOf(':') + 1));
+                    for (int i = 0; i < n; i++)
+                    {
+                        var t = s.Data.Terrains[s.Terrain[i]];
+                        if (s.Owner[i] != me || !t.IsProperty || t.Supplies != dom) continue;
+                        if (dom == Domain.Ground && t.Produces != null && RulesEngine.InProductionRange(s, me, i % w, i / w)) continue;
+                        if (dom != Domain.Ground)
+                        {
+                            // an airport or port taken by a unit that is staying there is no use to the others
+                            var o = s.UnitAt(i % w, i / w);
+                            if (o != null && (o.Army != me || AiPlayer.Need(s, o) > 0 || o.Hp <= 60)) continue;
+                        }
+                        src.Add(i);
+                    }
+                    if (dom == Domain.Ground && key.StartsWith("supply:"))
+                        foreach (var u in s.Units)
+                        {
+                            if (u.Army != me || u.IsCarried || !s.Def(u).CanSupply) continue;
+                            for (int k = 0; k < 4; k++)
+                            {
+                                int x = u.X + (k == 0 ? 1 : k == 1 ? -1 : 0), y = u.Y + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                                if (s.InBounds(x, y)) src.Add(s.Index(x, y));
+                            }
+                        }
+                }
+                else if (key == "focus")
+                {
+                    int f = ai.FocusTile(s);
+                    if (f >= 0) src.Add(f);
+                }
+                else if (key == "foeprod")
+                {
+                    // the enemy's base and the production sites around it
+                    for (int i = 0; i < n; i++)
+                    {
+                        var t = s.Data.Terrains[s.Terrain[i]];
+                        if (s.Owner[i] == foe && t.Produces == Domain.Ground && RulesEngine.InProductionRange(s, foe, i % w, i / w)) src.Add(i);
+                    }
+                }
+                else if (key == "ownhq")
                 {
                     for (int i = 0; i < n; i++)
-                        if (s.Owner[i] == me && s.Data.Terrains[s.Terrain[i]].Supplies == Domain.Air) src.Add(i);
+                        if (s.Owner[i] == me && s.Data.Terrains[s.Terrain[i]].Id == "HQ") src.Add(i);
                 }
                 else if (key == "foehq")
                 {
@@ -1517,7 +2163,7 @@ namespace FamiconWars.Core
                     {
                         var d = s.Def(u);
                         if (u.Army != me || u.IsCarried || d.Domain != Domain.Ground || d.CanSupply) continue;
-                        if (u.Fuel < d.Fuel * 0.4f || (d.Ammo > 0 && u.Ammo < d.Ammo * 0.4f)) src.Add(s.Index(u.X, u.Y));
+                        if (AiPlayer.Need(s, u) > 0) src.Add(s.Index(u.X, u.Y));
                     }
                 }
                 else if (key == "screen")

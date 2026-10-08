@@ -51,7 +51,34 @@ namespace FamiconWars.Game
 
         public event Action OnResupply, OnEndPhase, OnSurrender, OnRestart, OnCloseProduce, OnSpeed;
 
-        public bool PointerOverUi => EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
+        /// <summary>
+        /// Whether the mouse is over a UI element right now. A fresh raycast instead of
+        /// EventSystem.IsPointerOverGameObject: that one keeps the last hovered element until the mouse
+        /// moves, so after clicking a button that then disappeared (start, end phase) the wheel was
+        /// ignored until the pointer moved.
+        /// </summary>
+        public bool PointerOverUi
+        {
+            get
+            {
+                if (Time.frameCount == pointerUiFrame) return pointerUi;
+                pointerUiFrame = Time.frameCount;
+                pointerUi = false;
+                var es = EventSystem.current;
+                var mouse = UnityEngine.InputSystem.Mouse.current;
+                if (es == null || mouse == null) return false;
+                pointerData ??= new PointerEventData(es);
+                pointerData.position = mouse.position.ReadValue();
+                pointerHits.Clear();
+                es.RaycastAll(pointerData, pointerHits);
+                pointerUi = pointerHits.Count > 0;
+                return pointerUi;
+            }
+        }
+        int pointerUiFrame = -1;
+        bool pointerUi;
+        PointerEventData pointerData;
+        readonly List<RaycastResult> pointerHits = new List<RaycastResult>();
         public bool BannerShowing => bannerT >= 0;
 
         public void Build()

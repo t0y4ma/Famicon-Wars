@@ -8,9 +8,10 @@ namespace FamiconWars.Game
     /// <summary>Zoom readout and a reset button (back to the starting view), under the top bar on the right.</summary>
     public partial class GameHud
     {
-        public event Action OnZoomReset;
+        public event Action OnZoomReset, OnMatchSound;
 
         RectTransform zoomRoot;
+        Button matchSoundBtn;
         TextMeshProUGUI zoomLabel;
 
         void BuildCameraWidget()
@@ -24,6 +25,11 @@ namespace FamiconWars.Game
             var reset = MakeButton("Reset", zoomRoot, "リセット", false, () => OnZoomReset?.Invoke());
             Pin((RectTransform)reset.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-6, 0), new Vector2(124, 40), pivot: new Vector2(1, 0.5f));
             zoomRoot.gameObject.SetActive(false);
+
+            // sound settings during a match (also while watching)
+            matchSoundBtn = MakeButton("MatchSound", canvasRt, "サウンド", false, () => OnMatchSound?.Invoke());
+            Pin((RectTransform)matchSoundBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -152), new Vector2(300, 48), pivot: new Vector2(1, 1));
+            matchSoundBtn.gameObject.SetActive(false);
         }
 
         /// <summary>Zoom relative to the starting view, in percent.</summary>
@@ -37,6 +43,11 @@ namespace FamiconWars.Game
             if (zoomRoot == null) return;
             zoomRoot.gameObject.SetActive(on);
             if (on) zoomRoot.SetAsLastSibling();
+            if (matchSoundBtn != null)
+            {
+                matchSoundBtn.gameObject.SetActive(on);
+                if (on) matchSoundBtn.transform.SetAsLastSibling();
+            }
         }
     }
 }

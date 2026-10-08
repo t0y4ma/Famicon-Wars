@@ -113,6 +113,9 @@ namespace FamiconWars.Game
 
             hud.OnTitleOnline += ShowOnlineLobby;
             hud.OnSoundSettings += () => hud.ShowSoundPanel(settings);
+            hud.OnMatchSound += () => hud.ShowSoundPanel(settings);
+            hud.OnSpectatorBack += () => { if (online && myArmy < 0) BackToRoom(); };
+            hud.OnRoomWatch += () => { if (FwClient.IsConnected && room.HasValue && room.Value.started) FwClient.RequestResync(); };
             hud.OnOnlineBack += () => { FwClient.Disconnect(); ShowTitle(); };
             hud.OnOnlineCreate += addr => OnlineGo(addr, "create", null);
             hud.OnOnlineJoin += (addr, code) => OnlineGo(addr, "join", code);
@@ -130,6 +133,7 @@ namespace FamiconWars.Game
             hud.OnRoomSit += seat => FwClient.RoomAction("sit", seat);
             hud.OnRoomStand += () => FwClient.RoomAction("stand");
             hud.OnRoomBot += (seat, level) => FwClient.RoomAction("bot", seat, level.ToString());
+            hud.OnRoomBotStyle += (seat, style) => FwClient.RoomAction("botstyle", seat, style.ToString());
             hud.OnRoomHost += id => FwClient.RoomAction("host", id);
             hud.OnRoomMap += StepRoomMap;
             hud.OnRoomStart += () => FwClient.RoomAction("start");      // also right after a match (the server drops the finished game)
@@ -180,6 +184,8 @@ namespace FamiconWars.Game
             hud.ResetScreens();
             hud.ShowMatchChrome(false);
             hud.SetAbortButton(false);
+            hud.SetSpectatorBack(false);
+            hud.HideSoundPanel();
             if (board != null) { board.ClearHighlights(); board.SetCursor(0, 0, false); board.gameObject.SetActive(false); }
         }
 
@@ -244,8 +250,22 @@ namespace FamiconWars.Game
         {
             LeaveMatch();
             uint seed = (uint)System.Environment.TickCount;
+            // 戦法: as chosen, or random (and then not shown). COM vs COM: a random 戦法 never comes out the same
+            // as the other side's, so that one of them has the upper hand.
+            var seeds = new[] { seed, seed + 977u };
+            if (settings.Players[0] > 0 && settings.Players[1] > 0)
+            {
+                if (settings.Styles[1] == 0) seeds[1] = AiPlayer.SeedForStyleOtherThan(seeds[1], AiPlayer.BotStyle(settings.Styles[0], seeds[0]));
+                else if (settings.Styles[0] == 0) seeds[0] = AiPlayer.SeedForStyleOtherThan(seeds[0], (AiStyle)settings.Styles[1]);
+            }
             for (int a = 0; a < 2; a++)
-                ai[a] = settings.Players[a] > 0 ? new AiPlayer((Army)a, AiProfile.ForLevel(settings.Players[a]), seed + (uint)a * 977u) : null;
+            {
+                styleHidden[a] = settings.Styles[a] == 0;
+                if (settings.Players[a] <= 0) { ai[a] = null; continue; }
+                var prof = AiProfile.ForLevel(settings.Players[a]);
+                if (settings.Styles[a] > 0) prof.Style = (AiStyle)settings.Styles[a];
+                ai[a] = new AiPlayer((Army)a, prof, seeds[a]);
+            }
             LoadMap(settings.MapId);
             recMapId = settings.MapId; recCmds.Clear(); recSeeds.Clear(); recSaved = false;
             recSeedRng = new Rng((uint)System.Environment.TickCount | 1u);
@@ -444,8 +464,13 @@ namespace FamiconWars.Game
         bool ComTurn => InMatch && !replaying && !online && !state.GameOver && ai[(int)state.Active] != null;
         bool HumanTurn => InMatch && !replaying && !state.GameOver && (online ? myArmy >= 0 && (int)state.Active == myArmy && !awaiting && incoming.Count == 0 : ai[(int)state.Active] == null);
 
-        string ControllerName(Army a) => replaying ? (a == Army.Red ? replayRec.red : replayRec.blue) : online ? ((int)a == myArmy ? "あなた" : room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : "相手")
-            : ai[(int)a] == null ? "人間" : "COM " + ai[(int)a].Profile.Name;
+        string ControllerName(Army a) => replaying ? (a == Army.Red ? replayRec.red : replayRec.blue) : online ? ((int)a == myArmy ? "あなた" : (room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : "相手") + StyleTag(botCopies[(int)a]))
+            : ai[(int)a] == null ? "人間" : ComName(ai[(int)a]);
+
+        /// <summary>"COM 強い・速攻": the level and the 戦法 it drew for this match.</summary>
+        string ComName(AiPlayer p) => "COM " + p.Profile.Name + StyleTag(p);
+        readonly bool[] styleHidden = new bool[2];           // the 戦法 was left to chance: keep it secret
+        string StyleTag(AiPlayer p) => p == null || p.Style <= AiStyle.Standard || styleHidden[(int)p.Army] ? "" : "・" + AiProfile.StyleNames[(int)p.Style];
 
         int Income(Army a)
         {
@@ -458,6 +483,7 @@ namespace FamiconWars.Game
         {
             // online: the host only; offline: anyone, at any time (e.g. to end a COM vs COM match at once)
             hud.SetAbortButton(InMatch && !replaying && state != null && !state.GameOver && (!online || IAmHost));
+            hud.SetSpectatorBack(online && InMatch && !replaying && myArmy < 0 && !IAmHost && state != null && !state.GameOver);
             if (!InMatch) return;
             hud.SetTopBar(state, Income(state.Active), ControllerName(state.Active), HumanTurn, GameSettings.SpeedNames[Speed]);
         }
@@ -1129,6 +1155,7 @@ namespace FamiconWars.Game
                 v.SeatKinds[s] = m.seatKinds != null ? (SeatKind)m.seatKinds[s] : SeatKind.Empty;
                 v.SeatNames[s] = m.seatNames != null ? m.seatNames[s] : "";
                 v.SeatLevels[s] = m.seatLevels != null ? m.seatLevels[s] : 0;
+                v.SeatStyles[s] = m.seatStyles != null && m.seatStyles.Length > s ? m.seatStyles[s] : 0;
                 v.SeatOnline[s] = m.seatOnline != null && m.seatOnline[s];
             }
             for (int i = 0; m.memberIds != null && i < m.memberIds.Length; i++)
@@ -1239,7 +1266,9 @@ namespace FamiconWars.Game
             for (int s = 0; s < 2; s++)
             {
                 int level = m.botLevels != null && m.botLevels.Length > s ? m.botLevels[s] : 0;
-                botCopies[s] = level > 0 && m.botSeeds != null ? AiPlayer.ForOnline((Army)s, AiProfile.ForLevel(level), m.botSeeds[s]) : null;
+                int style = m.botStyles != null && m.botStyles.Length > s ? m.botStyles[s] : 0;
+                botCopies[s] = level > 0 && m.botSeeds != null ? AiPlayer.ForBot((Army)s, level, style, m.botSeeds[s]) : null;
+                styleHidden[s] = style == 0;               // a random 戦法 is not shown
                 any |= botCopies[s] != null;
             }
             var cmds = m.cmds ?? new string[0];
@@ -1316,7 +1345,7 @@ namespace FamiconWars.Game
         string RecordName(Army a)
         {
             if (online) return room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : Labels.Army(a);
-            return ai[(int)a] == null ? "人間" : "COM " + ai[(int)a].Profile.Name;
+            return ai[(int)a] == null ? "人間" : ComName(ai[(int)a]);
         }
 
         /// <summary>
