@@ -52,6 +52,7 @@ namespace FamiconWars.Game
             if (recordsRoot != null) recordsRoot.gameObject.SetActive(false);
             if (replayBar != null) replayBar.gameObject.SetActive(false);
             if (howRoot != null) howRoot.gameObject.SetActive(false);
+            howOverMatch = false;
         }
 
         void ShowOnly(RectTransform root, Button focus)
@@ -98,7 +99,7 @@ namespace FamiconWars.Game
             var online = MakeButton("Online", titleRoot, "オンライン対戦", false, () => OnTitleOnline?.Invoke());
             Pin((RectTransform)online.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(160, -212), new Vector2(340, 64), pivot: new Vector2(0, 0.5f));
 
-            var sound = MakeButton("Sound", titleRoot, "サウンド", false, () => OnSoundSettings?.Invoke());
+            var sound = MakeButton("Sound", titleRoot, "設定", false, () => OnSoundSettings?.Invoke());
             Pin((RectTransform)sound.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(160, -452), new Vector2(340, 64), pivot: new Vector2(0, 0.5f));
             var how = MakeButton("HowTo", titleRoot, "あそびかた", false, () => ShowHowTo());
             Pin((RectTransform)how.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(160, -292), new Vector2(340, 64), pivot: new Vector2(0, 0.5f));
@@ -114,7 +115,7 @@ namespace FamiconWars.Game
         public bool TitleVisible => titleRoot != null && titleRoot.gameObject.activeSelf;
         /// <summary>Screens that keep the title music: title, map select, match settings, how to play, match records.</summary>
         public bool TitleMusicScreen => TitleVisible || (mapRoot != null && mapRoot.gameObject.activeSelf)
-            || (setupRoot != null && setupRoot.gameObject.activeSelf) || HowToVisible || RecordsVisible;
+            || (setupRoot != null && setupRoot.gameObject.activeSelf) || (HowToVisible && !howOverMatch) || RecordsVisible;
 
         // ================= map select =================
 

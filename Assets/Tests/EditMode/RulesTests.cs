@@ -266,6 +266,19 @@ namespace FamiconWars.Tests
         }
 
         [Test]
+        public void JoinAddsTheDisplayedCounts()
+        {
+            // 2 machines (HP 12) + 6 machines (HP 52) are 8 machines, not 7 (HP 64)
+            var g = LoadData();
+            var s = Make(g, new[] { "..." }, null, ("TANK_B", Army.Red, 0, 0), ("TANK_B", Army.Red, 1, 0), ("INF", Army.Blue, 2, 0));
+            var a = At(s, 0, 0); var b = At(s, 1, 0);
+            a.Hp = 12; b.Hp = 52;
+            Assert.AreEqual(2, a.Count); Assert.AreEqual(6, b.Count);
+            Assert.IsTrue(Act(s, a, 1, 0, UnitAction.Join).Ok);
+            Assert.AreEqual(8, b.Count);
+        }
+
+        [Test]
         public void LoadUnloadAndCargoSharesDamage()
         {
             var g = LoadData();

@@ -50,7 +50,7 @@ namespace FamiconWars.Net
     public static class NetConfig
     {
         /// <summary>Bump whenever messages or rules change: client and server must match.</summary>
-        public const int ProtocolVersion = 6;
+        public const int ProtocolVersion = 7;
         public static ushort ServerPort = 7782;
         public const string PublicUrl = "wss://nine.freeddns.org/fw";
         public const string TokenKey = "fw.clientToken";

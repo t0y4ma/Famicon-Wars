@@ -117,15 +117,36 @@ namespace FamiconWars.Game
             howBody.lineSpacing = 12;
             Pin(howBody.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -108), new Vector2(-96, 660), pivot: new Vector2(0.5f, 1), stretchX: true);
 
-            var back = MakeButton("Back", howRoot, "戻る", false, () => ShowTitle());
+            var back = MakeButton("Back", howRoot, "戻る", false, () => { if (howOverMatch) HideHowToOverlay(); else ShowTitle(); });
             Pin((RectTransform)back.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(96, 56), new Vector2(200, 64), pivot: new Vector2(0, 0));
             howRoot.gameObject.SetActive(false);
         }
 
         public bool HowToVisible => howRoot != null && howRoot.gameObject.activeSelf;
+        /// <summary>Opened from a match (the 「ルール」 button): 戻る closes it and the match carries on underneath.</summary>
+        bool howOverMatch;
+        public bool HowToOverMatch => howOverMatch && HowToVisible;
+
+        /// <summary>The rules over the running match, without leaving it.</summary>
+        public void ShowHowToOverlay()
+        {
+            howOverMatch = true;
+            HideActionMenu();
+            howRoot.SetAsLastSibling();
+            howRoot.gameObject.SetActive(true);
+            ShowHowTopic(0);
+            SettleButtons(howRoot);
+        }
+
+        public void HideHowToOverlay()
+        {
+            howOverMatch = false;
+            howRoot.gameObject.SetActive(false);
+        }
 
         public void ShowHowTo()
         {
+            howOverMatch = false;
             ShowOnly(howRoot, howTabs.Count > 0 ? howTabs[0] : null);
             ShowHowTopic(0);
         }

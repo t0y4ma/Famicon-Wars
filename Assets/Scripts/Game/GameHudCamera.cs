@@ -43,11 +43,7 @@ namespace FamiconWars.Game
             if (zoomRoot == null) return;
             zoomRoot.gameObject.SetActive(on);
             if (on) zoomRoot.SetAsLastSibling();
-            if (matchSoundBtn != null)
-            {
-                matchSoundBtn.gameObject.SetActive(on);
-                if (on) matchSoundBtn.transform.SetAsLastSibling();
-            }
+            if (matchSoundBtn != null) matchSoundBtn.gameObject.SetActive(false);   // replaced by 設定 in the top bar
         }
     }
 }

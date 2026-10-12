@@ -114,6 +114,9 @@ namespace FamiconWars.Game
             hud.OnTitleOnline += ShowOnlineLobby;
             hud.OnSoundSettings += () => hud.ShowSoundPanel(settings);
             hud.OnMatchSound += () => hud.ShowSoundPanel(settings);
+            hud.OnSettings += () => hud.ShowSoundPanel(settings);
+            hud.OnRules += () => { Cancel(); hud.ShowHowToOverlay(); };
+            hud.OnChart += () => { Cancel(); hud.ShowMatchup(data, () => settings.ShowNumbers); };
             hud.OnSpectatorBack += () => { if (online && myArmy < 0) BackToRoom(); };
             hud.OnRoomWatch += () => { if (FwClient.IsConnected && room.HasValue && room.Value.started) FwClient.RequestResync(); };
             hud.OnOnlineBack += () => { FwClient.Disconnect(); ShowTitle(); };
@@ -135,6 +138,12 @@ namespace FamiconWars.Game
             hud.OnRoomBot += (seat, level) => FwClient.RoomAction("bot", seat, level.ToString());
             hud.OnRoomBotStyle += (seat, style) => FwClient.RoomAction("botstyle", seat, style.ToString());
             hud.OnRoomHost += id => FwClient.RoomAction("host", id);
+            hud.OnRoomRename += name =>
+            {
+                NetConfig.PlayerName = name;          // remembered for the next room too
+                hud.SetOnlineName(name);
+                FwClient.RoomAction("rename", 0, name);
+            };
             hud.OnRoomMap += StepRoomMap;
             hud.OnRoomStart += () => FwClient.RoomAction("start");      // also right after a match (the server drops the finished game)
             hud.OnRoomPublic += on => FwClient.RoomAction("public", on ? 1 : 0);
@@ -639,6 +648,7 @@ namespace FamiconWars.Game
             if (!HumanTurn) return;   // the COM drives the cursor during its phase
 
             board.SetCursor(hoverX, hoverY, !overUi && mode != Mode.GameOver && mode != Mode.Produce);
+            UpdateRangePreview(overUi);
             bool cancel = (mouse.rightButton.wasReleasedThisFrame && !rDragMoved) || (kb != null && kb.escapeKey.wasPressedThisFrame);
             if (cancel) { if (mode != Mode.Idle) GameAudio.Se("ui_cancel", 0.8f, 0); Cancel(); return; }
             if (!mouse.leftButton.wasPressedThisFrame || overUi) return;
@@ -747,6 +757,12 @@ namespace FamiconWars.Game
             var ghost = selected.Clone(); ghost.X = destX; ghost.Y = destY;
             if (!Combat.CanAttackFrom(state, ghost, u, destX, destY, destX != selected.X || destY != selected.Y)) return null;
             var f = Combat.Predict(state, ghost, destX, destY, u);
+            if (!settings.ShowNumbers)
+            {
+                string w = "相手に  <b>" + HitWord(u.Hp, (f.DamageToDefenderMin + f.DamageToDefenderMax) / 2) + "</b>";
+                string c = f.Counter ? "反撃  <b>" + CounterWord(selected.Hp, (f.DamageToAttackerMin + f.DamageToAttackerMax) / 2) + "</b>" : "反撃  なし";
+                return w + "\n" + c;
+            }
             string them = $"相手  {u.Count} → <b>{Range(Left(u.Hp, f.DamageToDefenderMax), Left(u.Hp, f.DamageToDefenderMin))}</b>";
             string us = f.Counter
                 ? $"自軍  {selected.Count} → <b>{Range(Left(selected.Hp, f.DamageToAttackerMax), Left(selected.Hp, f.DamageToAttackerMin))}</b>"
@@ -755,6 +771,21 @@ namespace FamiconWars.Game
         }
 
         static int Left(int hp, int dmg) => Mathf.Max(0, (hp - dmg + 9) / 10);
+
+        /// <summary>The forecast in words (数値の表示 off): how much of the target an attack takes.</summary>
+        static string HitWord(int hp, int dmg)
+        {
+            if (dmg >= hp) return "全滅させる";
+            float f = dmg / (float)Mathf.Max(1, hp);
+            return f >= 0.6f ? "大打撃" : f >= 0.3f ? "打撃" : f > 0 ? "小さな打撃" : "効かない";
+        }
+
+        static string CounterWord(int hp, int dmg)
+        {
+            if (dmg >= hp) return "全滅する";
+            float f = dmg / (float)Mathf.Max(1, hp);
+            return f >= 0.6f ? "大きい" : f >= 0.3f ? "中くらい" : f > 0 ? "小さい" : "なし";
+        }
 
         void Click(int x, int y)
         {
@@ -813,6 +844,38 @@ namespace FamiconWars.Game
             var joins = reach.Cost.Keys.Where(i => Movement.StopAt(state, u, i % state.Width, i / state.Width) == StopKind.Join).ToList();
             board.Highlight(joins, new Color(0.2f, 1f, 0.35f, 0.85f));
             hud.Hint(joins.Count > 0 ? "移動先をクリック(緑=合流 / 右クリックで取り消し)" : "移動先をクリック(右クリックで取り消し)");
+        }
+
+        int rangeFrom = -1;
+
+        /// <summary>
+        /// Guns and other indirect units cannot move and fire in the same phase: while one is selected,
+        /// the tiles it could fire on from the square under the cursor (after moving there) are outlined.
+        /// </summary>
+        void UpdateRangePreview(bool overUi)
+        {
+            int from = -1;
+            if (mode == Mode.Selected && selected != null && !overUi && state.InBounds(hoverX, hoverY))
+            {
+                var d = state.Def(selected);
+                int i = state.Index(hoverX, hoverY);
+                bool own = hoverX == selected.X && hoverY == selected.Y;
+                if (d.IsIndirect && (own || (reach.Reaches(i) && Movement.StopAt(state, selected, hoverX, hoverY) == StopKind.Empty))) from = i;
+            }
+            if (from == rangeFrom) return;
+            rangeFrom = from;
+            if (from < 0) { board.ShowRange(null); return; }
+            var dd = state.Def(selected);
+            int fx = from % state.Width, fy = from / state.Width;
+            var tiles = new List<int>();
+            for (int y = fy - dd.RangeMax; y <= fy + dd.RangeMax; y++)
+                for (int x = fx - dd.RangeMax; x <= fx + dd.RangeMax; x++)
+                {
+                    if (!state.InBounds(x, y)) continue;
+                    int r = Movement.Distance(x, y, fx, fy);
+                    if (r >= dd.RangeMin && r <= dd.RangeMax) tiles.Add(state.Index(x, y));
+                }
+            board.ShowRange(tiles);
         }
 
         /// <summary>Enemy tiles this unit could hit this phase (from any reachable tile; indirect only from where it stands).</summary>

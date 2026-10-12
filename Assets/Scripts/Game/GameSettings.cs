@@ -18,6 +18,8 @@ namespace FamiconWars.Game
         /// <summary>0 ゆっくり, 1 ふつう, 2 はやい, 3 最速.</summary>
         public int Speed = 1;
         public bool BattleAnimation = true;
+        /// <summary>Exact numbers (machines left after an attack, damage in the matchup chart) or words only.</summary>
+        public bool ShowNumbers = true;
 
         // ---- WIP: sound (properties only) ----
         public bool BgmEnabled = true;

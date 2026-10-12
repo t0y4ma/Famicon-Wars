@@ -152,7 +152,9 @@ namespace FamiconWars.Core
                 {
                     var t = FindOther(s, u, c.ToX, c.ToY);
                     int ca = u.Count, cb = t.Count;
-                    int sum = t.Hp + u.Hp;
+                    // the displayed counts add up (2 + 6 = 8, not 7 when both were a little under their count);
+                    // only what goes past 10 is lost
+                    int sum = Math.Max(t.Hp + u.Hp, (ca + cb - 1) * 10 + 1);
                     t.Hp = Math.Min(100, sum);
                     r.Events.Add(new JoinedEvent { UnitId = u.Id, IntoId = t.Id, CountA = ca, CountB = cb, CountAfter = t.Count, Overflow = Math.Max(0, ca + cb - t.Count) });
                     t.Fuel = Math.Max(t.Fuel, u.Fuel);

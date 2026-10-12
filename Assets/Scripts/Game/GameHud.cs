@@ -32,7 +32,10 @@ namespace FamiconWars.Game
         // top bar
         Image armyTab, armyLine;
         TextMeshProUGUI armyText, dayText, fundsText, incomeText, controllerText;
-        Button resupplyBtn, endBtn, surrenderBtn, speedBtn;
+        Button resupplyBtn, endBtn, surrenderBtn, speedBtn, rulesBtn, chartBtn, settingsBtn;
+        RectTransform sysGroup;        // right end of the top bar: system actions (rules, chart, settings, speed, end match, surrender)
+        RectTransform actionPanel;     // bottom of the screen: the game actions of a phase (resupply all, end phase)
+        float surrenderArmedUntil = -1;
 
         // info card
         RectTransform infoCard;
@@ -49,7 +52,7 @@ namespace FamiconWars.Game
         RectTransform bannerRt; CanvasGroup bannerGroup; Image bannerBand; TextMeshProUGUI bannerTitle, bannerSub; float bannerT = -1;
         RectTransform overPanel; TextMeshProUGUI overTitle, overReason; Image overStripe;
 
-        public event Action OnResupply, OnEndPhase, OnSurrender, OnRestart, OnCloseProduce, OnSpeed;
+        public event Action OnResupply, OnEndPhase, OnSurrender, OnRestart, OnCloseProduce, OnSpeed, OnRules, OnChart, OnSettings;
 
         /// <summary>
         /// Whether the mouse is over a UI element right now. A fresh raycast instead of
@@ -144,14 +147,54 @@ namespace FamiconWars.Game
             incomeText.lineSpacing = -8;
             Pin(incomeText.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(730, 0), new Vector2(230, 64), pivot: new Vector2(0, 0.5f));
 
-            surrenderBtn = MakeButton("Surrender", bar, "降伏", false, () => OnSurrender?.Invoke());
-            Pin((RectTransform)surrenderBtn.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-24, 0), new Vector2(110, 52), pivot: new Vector2(1, 0.5f));
-            endBtn = MakeButton("EndPhase", bar, "手番終了", true, () => OnEndPhase?.Invoke());
-            Pin((RectTransform)endBtn.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-150, 0), new Vector2(190, 52), pivot: new Vector2(1, 0.5f));
-            resupplyBtn = MakeButton("Resupply", bar, "全補", false, () => OnResupply?.Invoke());
-            Pin((RectTransform)resupplyBtn.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-356, 0), new Vector2(130, 52), pivot: new Vector2(1, 0.5f));
-            speedBtn = MakeButton("Speed", bar, "", false, () => OnSpeed?.Invoke());
-            Pin((RectTransform)speedBtn.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-502, 0), new Vector2(190, 52), pivot: new Vector2(1, 0.5f));
+            // ---- system actions: a row at the right end of the bar ----
+            sysGroup = new GameObject("System", typeof(RectTransform)).GetComponent<RectTransform>();
+            sysGroup.SetParent(bar, false);
+            Pin(sysGroup, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-24, 0), new Vector2(900, 52), pivot: new Vector2(1, 0.5f));
+            var row = sysGroup.gameObject.AddComponent<HorizontalLayoutGroup>();
+            row.childAlignment = TextAnchor.MiddleRight; row.spacing = 8;
+            row.childControlWidth = true; row.childControlHeight = true;
+            row.childForceExpandWidth = false; row.childForceExpandHeight = true;
+            rulesBtn = SysButton("Rules", "ルール", 110, () => OnRules?.Invoke());
+            chartBtn = SysButton("Chart", "相性表", 120, () => OnChart?.Invoke());
+            settingsBtn = SysButton("Settings", "設定", 100, () => OnSettings?.Invoke());
+            speedBtn = SysButton("Speed", "", 170, () => OnSpeed?.Invoke());
+            surrenderBtn = SysButton("Surrender", "降伏", 110, () =>
+            {
+                // the first click asks, the second (within 4 s) gives up
+                var t = surrenderBtn.GetComponentInChildren<TextMeshProUGUI>();
+                if (Time.unscaledTime <= surrenderArmedUntil) { surrenderArmedUntil = -1; SetText(t, "降伏"); OnSurrender?.Invoke(); return; }
+                surrenderArmedUntil = Time.unscaledTime + 4f;
+                SetText(t, "<color=#F07A62>本当に?</color>");
+            });
+
+            // ---- game actions of a phase: at the bottom of the screen, under the board ----
+            actionPanel = Panel("PhaseActions", canvasRt, new Color(Plate.r, Plate.g, Plate.b, 0.92f));
+            Pin(actionPanel, new Vector2(0.5f, 0), new Vector2(0.5f, 0), new Vector2(0, 24), new Vector2(392, 76), pivot: new Vector2(0.5f, 0));
+            Edge(actionPanel, PlateEdge);
+            resupplyBtn = MakeButton("Resupply", actionPanel, "全補", false, () => OnResupply?.Invoke());
+            Pin((RectTransform)resupplyBtn.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(12, 0), new Vector2(140, 56), pivot: new Vector2(0, 0.5f));
+            endBtn = MakeButton("EndPhase", actionPanel, "手番終了", true, () => OnEndPhase?.Invoke());
+            Pin((RectTransform)endBtn.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-12, 0), new Vector2(216, 56), pivot: new Vector2(1, 0.5f));
+            actionPanel.gameObject.SetActive(false);
+        }
+
+        /// <summary>A button in the system row of the top bar.</summary>
+        Button SysButton(string name, string text, float width, Action onClick)
+        {
+            var b = MakeButton(name, sysGroup, text, false, onClick);
+            var le = b.gameObject.AddComponent<LayoutElement>();
+            le.preferredWidth = width; le.minWidth = width;
+            return b;
+        }
+
+        /// <summary>Puts a button that is made elsewhere (end match, back to the room) into the system row, before 降伏.</summary>
+        void AddToSystemRow(Button b, float width)
+        {
+            b.transform.SetParent(sysGroup, false);
+            var le = b.GetComponent<LayoutElement>() ?? b.gameObject.AddComponent<LayoutElement>();
+            le.preferredWidth = width; le.minWidth = width;
+            b.transform.SetSiblingIndex(surrenderBtn.transform.GetSiblingIndex());
         }
 
         /// <param name="controller">"人間" or "COM 普通" etc.</param>
@@ -170,6 +213,11 @@ namespace FamiconWars.Game
             resupplyBtn.interactable = live && !s.ResupplyUsed[(int)s.Active];
             endBtn.interactable = live;
             surrenderBtn.interactable = live;
+            if (surrenderArmedUntil >= 0 && (Time.unscaledTime > surrenderArmedUntil || !live))
+            {
+                surrenderArmedUntil = -1;
+                SetText(surrenderBtn.GetComponentInChildren<TextMeshProUGUI>(), "降伏");
+            }
             speedBtn.GetComponentInChildren<TextMeshProUGUI>().text = "<size=75%><color=#A3AC92>速度</color></size> " + speedLabel;
         }
 
@@ -278,6 +326,7 @@ namespace FamiconWars.Game
         public void ShowMatchChrome(bool on)
         {
             topBar.gameObject.SetActive(on);
+            if (actionPanel != null) actionPanel.gameObject.SetActive(on);
             ShowZoomWidget(on);
             if (!on) infoCard.gameObject.SetActive(false);
         }
@@ -294,7 +343,7 @@ namespace FamiconWars.Game
             hintPlate.gameObject.SetActive(false);
 
             toastPlate = Panel("Toast", canvasRt, Plate);
-            Pin(toastPlate, new Vector2(0.5f, 0), new Vector2(0.5f, 0), new Vector2(0, 28), new Vector2(620, 64), pivot: new Vector2(0.5f, 0));
+            Pin(toastPlate, new Vector2(0.5f, 0), new Vector2(0.5f, 0), new Vector2(0, 116), new Vector2(620, 64), pivot: new Vector2(0.5f, 0));
             Edge(toastPlate);
             toastText = Label("Text", toastPlate, SizeBody, Paper, TextAlignmentOptions.Center, false);
             Fill(toastText.rectTransform, 16, 6, 16, 6);

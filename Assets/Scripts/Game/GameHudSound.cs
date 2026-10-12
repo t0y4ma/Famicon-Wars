@@ -7,7 +7,7 @@ using UnityEngine.UI;
 namespace FamiconWars.Game
 {
     /// <summary>
-    /// Sound settings: music on/off and the two volumes as sliders. A small window opened from the title
+    /// 「設定」: music on/off, the two volumes as sliders, and whether damage is shown as numbers or words. A small window opened from the title
     /// screen and the online lobby; the match settings screen uses the same sliders. Changes are heard at
     /// once and saved.
     /// </summary>
@@ -15,7 +15,7 @@ namespace FamiconWars.Game
     {
         RectTransform soundRoot;
         GameSettings soundSettings;
-        Button soundBgmOn, soundBgmOff;
+        Button soundBgmOn, soundBgmOff, numbersOn, numbersOff;
         Slider soundBgmVol, soundSeVol;
         TextMeshProUGUI soundBgmVal, soundSeVal;
 
@@ -81,10 +81,10 @@ namespace FamiconWars.Game
             var card = Panel("Card", soundRoot, Plate);
             card.GetComponent<Image>().raycastTarget = true;
             card.gameObject.AddComponent<ClickSink>();             // clicks on the window do not reach the dimmer
-            Pin(card, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(820, 440));
+            Pin(card, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(820, 540));
             Edge(card, Brass);
             var title = Label("Title", card, SizeTitle, Paper, TextAlignmentOptions.MidlineLeft, true);
-            title.text = "サウンド";
+            title.text = "設定";
             Pin(title.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(40, -28), new Vector2(400, 56), pivot: new Vector2(0, 1));
 
             SoundRowLabel(card, "BGM", -112);
@@ -99,6 +99,16 @@ namespace FamiconWars.Game
             SoundRowLabel(card, "効果音 音量", -272);
             soundSeVol = MakeSlider("SeVolume", card, new Vector2(240, -272), 540, out soundSeVal,
                 v => { soundSettings.SeVolume = v; ApplySound(); }, () => GameAudio.Se("capture_done", 1f, 0));
+
+            // numbers: how many machines an attack leaves, damage in the matchup chart
+            SoundRowLabel(card, "数値の表示", -352);
+            numbersOn = MakeButton("NumbersOn", card, "表示する", false, () => SetNumbers(true));
+            Pin((RectTransform)numbersOn.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -352), new Vector2(170, 56), pivot: new Vector2(0, 1));
+            numbersOff = MakeButton("NumbersOff", card, "表示しない", false, () => SetNumbers(false));
+            Pin((RectTransform)numbersOff.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(420, -352), new Vector2(170, 56), pivot: new Vector2(0, 1));
+            var numbersNote = Label("NumbersNote", card, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
+            numbersNote.text = "攻撃の見込みと相性表を、数字で出すか言葉で出すか";
+            Pin(numbersNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -414), new Vector2(540, 28), pivot: new Vector2(0, 1));
 
             var close = MakeButton("Close", card, "閉じる", true, HideSoundPanel);
             Pin((RectTransform)close.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-40, 32), new Vector2(200, 60), pivot: new Vector2(1, 0));
@@ -120,6 +130,8 @@ namespace FamiconWars.Game
             StyleButton(soundBgmOff, !s.BgmEnabled);
             SetSlider(soundBgmVol, soundBgmVal, s.BgmVolume);
             SetSlider(soundSeVol, soundSeVal, s.SeVolume);
+            StyleButton(numbersOn, s.ShowNumbers);
+            StyleButton(numbersOff, !s.ShowNumbers);
             soundRoot.SetAsLastSibling();
             soundRoot.gameObject.SetActive(true);
             SettleButtons(soundRoot);
@@ -143,6 +155,14 @@ namespace FamiconWars.Game
         }
 
         void ApplySound() => GameAudio.Apply(soundSettings);
+
+        void SetNumbers(bool on)
+        {
+            soundSettings.ShowNumbers = on;
+            StyleButton(numbersOn, on);
+            StyleButton(numbersOff, !on);
+            if (MatchupVisible) RefreshMatchup();
+        }
     }
 
     /// <summary>Swallows clicks so they do not bubble up to a parent that closes the window.</summary>

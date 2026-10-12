@@ -84,6 +84,7 @@ namespace FamiconWars.Game
             replayBar.gameObject.SetActive(on);
             if (on) replayBar.SetAsLastSibling();
             if (on) overPanel.gameObject.SetActive(false);
+            if (on && actionPanel != null) actionPanel.gameObject.SetActive(false);   // nothing to order while reviewing
         }
 
         public void SetReplayInfo(string head, string move, bool auto)

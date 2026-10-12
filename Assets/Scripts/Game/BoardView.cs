@@ -21,9 +21,14 @@ namespace FamiconWars.Game
         Sprite square, shadow, badge;
         Font font;
         GameState state;
-        SpriteRenderer[] ownerMarks;
+        SpriteRenderer[] ownerMarks;      // a property's owner bar, or its whole tile when it has a picture
+        bool[] pictured;                  // the property is drawn from Resources/Tiles (roof / flag in the owner's colour)
         SpriteRenderer[] highlights;
+        SpriteRenderer[] rangeMarks;       // outlined squares: where a gun could fire from the tile under the cursor
+        SpriteRenderer[] produceMarks;     // a badge on facilities that can build units for their owner
+        Sprite ringSprite, produceSprite;
         TextMesh[] captureTexts;
+        SpriteRenderer[] captureBacks;
         readonly Dictionary<int, UnitView> unitViews = new Dictionary<int, UnitView>();
         Transform unitRoot;
         SpriteRenderer cursor;
@@ -51,7 +56,13 @@ namespace FamiconWars.Game
             int n = s.Width * s.Height;
             ownerMarks = new SpriteRenderer[n];
             highlights = new SpriteRenderer[n];
+            rangeMarks = new SpriteRenderer[n];
+            produceMarks = new SpriteRenderer[n];
+            ringSprite = RingSprite();
+            produceSprite = ProduceSprite();
             captureTexts = new TextMesh[n];
+            captureBacks = new SpriteRenderer[n];
+            pictured = new bool[n];
             for (int y = 0; y < s.Height; y++)
                 for (int x = 0; x < s.Width; x++)
                 {
@@ -59,16 +70,44 @@ namespace FamiconWars.Game
                     var t = s.TerrainAt(x, y);
                     ColorUtility.TryParseHtmlString(t.Color, out var col);
                     var tile = MakeSprite("T" + x + "_" + y, tileRoot, new Vector3(x, -y, 0), 0.96f, col, 0);
-                    if (t.IsProperty)
+                    // picture tiles fill the whole square (the grid line is drawn into the picture)
+                    var ground = t.IsProperty ? null : TerrainIcons.Get(s, x, y);
+                    if (ground != null) { tile.sprite = ground; tile.color = Color.white; tile.transform.localScale = Vector3.one; }
+                    if (ground != null)
+                        foreach (var border in TerrainIcons.Borders(s, x, y))
+                            MakeSprite("Border", tile.transform, Vector3.zero, 1f, Color.white, 1, border);
+                    // a bridge over a river: the deck goes over the river and its borders
+                    var deck = ground != null ? TerrainIcons.Deck(s, x, y) : null;
+                    if (deck != null) MakeSprite("Deck", tile.transform, new Vector3(0, 0, -0.001f), 1f, Color.white, 1, deck);
+                    if (t.IsProperty && TileIcons.Get(t.Id, s.Owner[i]) != null)
+                    {
+                        // picture tile: the building itself shows the owner (swapped in Refresh)
+                        tile.sprite = TileIcons.Get(t.Id, s.Owner[i]);
+                        tile.color = Color.white;
+                        tile.transform.localScale = Vector3.one;
+                        ownerMarks[i] = tile;
+                        pictured[i] = true;
+                        captureBacks[i] = MakeSprite("CapBack", tile.transform, new Vector3(0, 0.36f, 0), 0.3f, BadgeBack, 7, badge);
+                        captureBacks[i].transform.localScale = new Vector3(0.62f, 0.26f, 1);
+                        captureTexts[i] = MakeText("Cap", tile.transform, new Vector3(0, 0.36f, 0), "", 0.045f, Color.white, 8);
+                    }
+                    else if (t.IsProperty)
                     {
                         ownerMarks[i] = MakeSprite("Own", tile.transform, new Vector3(0, 0.3f, 0), 0.32f, Neutral, 1);
                         ownerMarks[i].transform.localScale = new Vector3(0.9f, 0.3f, 1);
                         MakeText("Name", tile.transform, new Vector3(0, -0.28f, 0), Labels.Get(t.NameKey), 0.05f, new Color(0, 0, 0, 0.75f), 1);
                         captureTexts[i] = MakeText("Cap", tile.transform, new Vector3(0, 0.36f, 0), "", 0.045f, Color.white, 8);
                     }
-                    else if (t.Id == "MOUNTAIN" || t.Id == "FOREST")
+                    else if (ground == null && (t.Id == "MOUNTAIN" || t.Id == "FOREST"))
                         MakeText("Glyph", tile.transform, Vector3.zero, t.Id == "MOUNTAIN" ? "▲" : "♣", 0.12f, new Color(0, 0, 0, 0.35f), 1);
                     highlights[i] = MakeSprite("Hi", tile.transform, Vector3.zero, 1f, Color.clear, 2);
+                    rangeMarks[i] = MakeSprite("Range", tile.transform, new Vector3(0, 0, -0.01f), 1f, new Color(1f, 0.55f, 0.15f, 0.95f), 2, ringSprite);
+                    rangeMarks[i].enabled = false;
+                    if (t.IsProperty && t.Produces != null)
+                    {
+                        produceMarks[i] = MakeSprite("Produce", tile.transform, new Vector3(-0.32f, -0.32f, 0), 0.3f, Color.white, 3, produceSprite);
+                        produceMarks[i].enabled = false;
+                    }
                 }
             unitRoot = new GameObject("Units").transform; unitRoot.SetParent(transform, false);
             cursor = MakeSprite("Cursor", transform, Vector3.zero, 1.04f, new Color(1, 1, 0.3f, 0.35f), 9);
@@ -84,8 +123,12 @@ namespace FamiconWars.Game
             {
                 if (ownerMarks[i] == null) continue;
                 var o = state.Owner[i];
-                ownerMarks[i].color = o == Army.Red ? RedArmy : o == Army.Blue ? BlueArmy : Neutral;
+                if (pictured[i]) ownerMarks[i].sprite = TileIcons.Get(state.Data.Terrains[state.Terrain[i]].Id, o);
+                else ownerMarks[i].color = o == Army.Red ? RedArmy : o == Army.Blue ? BlueArmy : Neutral;
                 captureTexts[i].text = state.CapturingUnit[i] >= 0 ? state.CaptureProgress[i] + "/" + state.Rules.CaptureGoal : "";
+                if (captureBacks[i] != null) captureBacks[i].enabled = captureTexts[i].text.Length > 0;
+                if (produceMarks[i] != null)
+                    produceMarks[i].enabled = o != Army.None && RulesEngine.InProductionRange(state, o, i % state.Width, i / state.Width);
             }
             var alive = new HashSet<int>();
             foreach (var u in state.Units)
@@ -138,6 +181,15 @@ namespace FamiconWars.Game
         static Vector3 IconRest(UnitDef d) => new Vector3(0, d.Domain == Domain.Air ? 0.12f : 0.04f, 0);
 
         public void ClearHighlights() { foreach (var h in highlights) h.color = Color.clear; }
+
+        /// <summary>Outlines these tiles (null clears).</summary>
+        public void ShowRange(IEnumerable<int> tiles)
+        {
+            if (rangeMarks == null) return;
+            foreach (var m in rangeMarks) if (m != null) m.enabled = false;
+            if (tiles == null) return;
+            foreach (var i in tiles) if (i >= 0 && i < rangeMarks.Length) rangeMarks[i].enabled = true;
+        }
 
         public void Highlight(IEnumerable<int> tiles, Color c) { foreach (var i in tiles) highlights[i].color = c; }
 
@@ -216,6 +268,41 @@ namespace FamiconWars.Game
             for (int i = 0; i < 256; i++) px[i] = Color.white;
             tex.SetPixels(px); tex.Apply();
             return Sprite.Create(tex, new Rect(0, 0, 16, 16), new Vector2(0.5f, 0.5f), 16);
+        }
+
+        /// <summary>A hollow square (the outline of a tile).</summary>
+        static Sprite RingSprite()
+        {
+            const int n = 32;
+            var tex = new Texture2D(n, n) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp };
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++)
+                {
+                    int e = Mathf.Min(Mathf.Min(x, y), Mathf.Min(n - 1 - x, n - 1 - y));
+                    // a bright outline with a dark rim outside it, and a faint fill
+                    tex.SetPixel(x, y, e <= 1 ? new Color(1, 1, 1, 1) : e == 2 ? new Color(0.1f, 0.05f, 0, 0.8f) : new Color(1, 1, 1, 0.16f));
+                }
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, n, n), new Vector2(0.5f, 0.5f), n);
+        }
+
+        /// <summary>The "can build here" badge: a hammer on a brass disc.</summary>
+        static Sprite ProduceSprite()
+        {
+            const int n = 16;
+            var tex = new Texture2D(n, n) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp };
+            var brass = new Color(0.95f, 0.72f, 0.2f); var dark = new Color(0.16f, 0.11f, 0.07f); var clear = new Color(0, 0, 0, 0);
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++)
+                {
+                    float dx = x - 7.5f, dy = y - 7.5f, r = Mathf.Sqrt(dx * dx + dy * dy);
+                    tex.SetPixel(x, y, r <= 6.6f ? brass : r <= 7.9f ? dark : clear);
+                }
+            // hammer (texture rows count from the bottom): head across the top, handle down the middle
+            for (int x = 4; x <= 11; x++) for (int y = 9; y <= 11; y++) tex.SetPixel(x, y, dark);
+            for (int y = 3; y <= 8; y++) for (int x = 7; x <= 8; x++) tex.SetPixel(x, y, dark);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, n, n), new Vector2(0.5f, 0.5f), n);
         }
 
         static Sprite EllipseSprite()

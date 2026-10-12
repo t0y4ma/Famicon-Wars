@@ -46,6 +46,7 @@ namespace FamiconWars.Game
         public event Action<int, int> OnRoomBot;             // seat, level 0-4
         public event Action<int, int> OnRoomBotStyle;        // seat, 戦法 0 random / 1-3
         public event Action OnRoomStand, OnRoomStart, OnRoomLeave;
+        public event Action<string> OnRoomRename;          // new display name
 
         RectTransform onlineRoot, onlineForm, roomRoot, roomBody;
         TMP_InputField addressInput, codeInput, nameInput;
@@ -119,7 +120,7 @@ namespace FamiconWars.Game
 
             var back = MakeButton("Back", onlineRoot, "戻る", false, () => OnOnlineBack?.Invoke());
             Pin((RectTransform)back.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(96, 56), new Vector2(200, 64), pivot: new Vector2(0, 0));
-            var sound = MakeButton("Sound", onlineRoot, "サウンド", false, () => OnSoundSettings?.Invoke());
+            var sound = MakeButton("Sound", onlineRoot, "設定", false, () => OnSoundSettings?.Invoke());
             Pin((RectTransform)sound.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(320, 56), new Vector2(220, 64), pivot: new Vector2(0, 0));
 
             // ---- room screen (its own full-screen page; built once, updated on every status) ----
@@ -145,9 +146,8 @@ namespace FamiconWars.Game
             {
                 if (!visible) return;
                 spectatorBackBtn = MakeButton("SpectatorBack", canvasRt, "部屋に戻る", false, () => OnSpectatorBack?.Invoke());
-                Pin((RectTransform)spectatorBackBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-336, -92), new Vector2(260, 52), pivot: new Vector2(1, 1));
+                AddToSystemRow(spectatorBackBtn, 160);
             }
-            if (visible && !spectatorBackBtn.gameObject.activeSelf) spectatorBackBtn.transform.SetAsLastSibling();
             SetActive(spectatorBackBtn, visible);
         }
 
@@ -166,16 +166,15 @@ namespace FamiconWars.Game
                 {
                     if (Time.unscaledTime <= abortArmedUntil) { abortArmedUntil = -1; SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "対局を終了"); OnAbortMatch?.Invoke(); return; }
                     abortArmedUntil = Time.unscaledTime + 4f;
-                    SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "<color=#F07A62>もう一度押すと終了</color>");
+                    SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "<color=#F07A62>もう一度で終了</color>");
                 });
-                Pin((RectTransform)abortBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-336, -92), new Vector2(260, 52), pivot: new Vector2(1, 1));
+                AddToSystemRow(abortBtn, 190);
             }
             if (abortArmedUntil >= 0 && Time.unscaledTime > abortArmedUntil)
             {
                 abortArmedUntil = -1;
                 SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "対局を終了");
             }
-            if (visible && !abortBtn.gameObject.activeSelf) abortBtn.transform.SetAsLastSibling();
             SetActive(abortBtn, visible);
         }
 
@@ -331,6 +330,8 @@ namespace FamiconWars.Game
 
         // ---- room page parts: built once, then only updated (no rebuilding, so nothing flickers) ----
         TextMeshProUGUI roomCodeLabel, roomInvite, roomMapName, roomMapNote, roomMembersTitle, roomHint;
+        TMP_InputField roomNameInput;
+        Button roomNameApply;
         RawImage roomMapPreview;
         Button roomMapPrev, roomMapNext, roomLeave, roomStand, roomStart, roomWatch;
         RectTransform botBlocker, botStrip;
@@ -402,6 +403,24 @@ namespace FamiconWars.Game
                 memberRowHost[k] = MakeButton("Host" + k, list, "部屋主にする", false, () => OnRoomHost?.Invoke(memberRowIds[row]));
                 Pin((RectTransform)memberRowHost[k].transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, y), new Vector2(200, 40), pivot: new Vector2(1, 1));
             }
+
+            // my display name (can be changed at any time, also during a match)
+            var namePlate = Panel("MyName", roomBody, Plate);
+            Pin(namePlate, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-96, -480), new Vector2(560, 150), pivot: new Vector2(1, 1));
+            Edge(namePlate, PlateEdge);
+            var nameLabel = Label("Label", namePlate, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
+            nameLabel.text = "自分の表示名";
+            Pin(nameLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -16), new Vector2(300, 28), pivot: new Vector2(0, 1));
+            roomNameInput = MakeInput("NameInput", namePlate, "表示名(12文字まで)", TMP_InputField.ContentType.Standard);
+            roomNameInput.characterLimit = 12;
+            Pin((RectTransform)roomNameInput.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -56), new Vector2(340, 56), pivot: new Vector2(0, 1));
+            roomNameApply = MakeButton("NameApply", namePlate, "変更", true, () =>
+            {
+                var n = roomNameInput.text.Trim();
+                if (n.Length > 0) OnRoomRename?.Invoke(n);
+            });
+            Pin((RectTransform)roomNameApply.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -56), new Vector2(150, 56), pivot: new Vector2(1, 1));
+            roomNameInput.onSubmit.AddListener(_ => roomNameApply.onClick.Invoke());
 
             // footer
             roomLeave = MakeButton("Leave", roomBody, "部屋を出る", false, () => OnRoomLeave?.Invoke());
@@ -508,6 +527,10 @@ namespace FamiconWars.Game
             SetActive(roomMapNext, v.IAmHost && v.Editable);
 
             for (int s = 0; s < 2; s++) UpdateSeat(v, s);
+
+            // my name: filled in from the room, unless the player is typing a new one
+            foreach (var m in v.Members)
+                if (m.me && !roomNameInput.isFocused && roomNameInput.text != m.name) roomNameInput.text = m.name;
 
             // members
             SetText(roomMembersTitle, "部屋にいる人(" + v.Members.Count + ")   ★ = 部屋主");

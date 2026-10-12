@@ -299,6 +299,10 @@ namespace FamiconWars.Core
                     else if (room.Seats[0] == SeatKind.Empty || room.Seats[1] == SeatKind.Empty) err = "両方の席が埋まると開始できます";
                     else { if (room.Started) DropFinished(room); StartMatch(room); }
                     break;
+                case "rename":
+                    // anyone, any time (also during a match): the new name shows in the room and on the seats
+                    me.Name = CleanName(text);
+                    break;
                 case "reset":
                     if (!host) err = "部屋主だけが部屋に戻せます";
                     else if (!room.Started) { }
