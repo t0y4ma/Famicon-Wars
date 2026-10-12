@@ -1,4 +1,5 @@
 using System;
+using FamiconWars.Core;
 using UnityEngine;
 
 namespace FamiconWars.Game
@@ -11,10 +12,20 @@ namespace FamiconWars.Game
     public class GameSettings
     {
         public string MapId = "map01";
-        /// <summary>Per army: 0 = human, 1..4 = COM level.</summary>
-        public int[] Players = { 0, 2 };
+        /// <summary>Per army (Armies.Max entries): 0 = human, 1..4 = COM level, -1 = nobody (only on maps for 3 or more).</summary>
+        public int[] Players = DefaultPlayers();
         /// <summary>Per army, for a COM: 0 = random 戦法 (kept secret), 1 速攻, 2 物量, 3 精鋭.</summary>
-        public int[] Styles = { 0, 0 };
+        public int[] Styles = new int[Armies.Max];
+        /// <summary>Time for one human phase in seconds (TurnTime): 0 = no limit.</summary>
+        public int TurnSeconds = TurnTime.DefaultSeconds;
+        public const int Nobody = -1;
+
+        static int[] DefaultPlayers()
+        {
+            var p = new int[Armies.Max];
+            for (int i = 1; i < p.Length; i++) p[i] = 2;   // you against COM 普通
+            return p;
+        }
         /// <summary>0 ゆっくり, 1 ふつう, 2 はやい, 3 最速.</summary>
         public int Speed = 1;
         public bool BattleAnimation = true;
@@ -57,14 +68,29 @@ namespace FamiconWars.Game
 
         void Sanitize()
         {
-            if (Players == null || Players.Length != 2) Players = new[] { 0, 2 };
-            for (int i = 0; i < 2; i++) Players[i] = Mathf.Clamp(Players[i], 0, 4);
-            if (Styles == null || Styles.Length != 2) Styles = new[] { 0, 0 };
-            for (int i = 0; i < 2; i++) Styles[i] = Mathf.Clamp(Styles[i], 0, 3);
+            // older saves have two armies: keep their choices and add the rest
+            var p = DefaultPlayers();
+            if (Players != null) for (int i = 0; i < Math.Min(p.Length, Players.Length); i++) p[i] = Mathf.Clamp(Players[i], Nobody, 4);
+            Players = p;
+            var st = new int[Armies.Max];
+            if (Styles != null) for (int i = 0; i < Math.Min(st.Length, Styles.Length); i++) st[i] = Mathf.Clamp(Styles[i], 0, 3);
+            Styles = st;
+            TurnSeconds = TurnTime.Clamp(TurnSeconds);
             Speed = Mathf.Clamp(Speed, 0, SpeedNames.Length - 1);
             BgmVolume = Mathf.Clamp(BgmVolume, 0, 100);
             SeVolume = Mathf.Clamp(SeVolume, 0, 100);
             if (MapCatalog.Find(MapId) == null || !MapCatalog.Find(MapId).Ready) MapId = "map01";
+        }
+
+        /// <summary>Who takes part on a map for this many armies: at least two, an empty seat counts as nobody.</summary>
+        public bool[] Seated(int players)
+        {
+            var seated = new bool[players];
+            int n = 0;
+            for (int a = 0; a < players; a++) { seated[a] = Players[a] != Nobody; if (seated[a]) n++; }
+            // two armies always play (a two-army map has no empty seats)
+            for (int a = 0; a < players && n < 2; a++) if (!seated[a]) { seated[a] = true; Players[a] = 2; n++; }
+            return seated;
         }
     }
 
@@ -72,6 +98,8 @@ namespace FamiconWars.Game
     {
         public string Id, Name, Note;
         public int Width, Height;
+        /// <summary>Armies on the map (bases).</summary>
+        public int Players = 2;
         public bool Ready;
     }
 
@@ -92,6 +120,10 @@ namespace FamiconWars.Game
                 Note = "点対称の平原。都市は中央に多く、道は一本。後手は都市が1つ多い。" },
             new MapEntry { Id = "map06", Name = "対戦用 B", Width = 22, Height = 15, Ready = true,
                 Note = "中央を川が横切る点対称マップ。橋と浅瀬で10か所から渡れ、川べりの都市を奪い合う。" },
+            new MapEntry { Id = "map07", Name = "四つ巴", Width = 22, Height = 22, Players = 4, Ready = true,
+                Note = "4軍が四隅から。どの軍も同じ地形(90度ずつ回した形)。中央の4都市の取り合い。2〜4人で遊べる。" },
+            new MapEntry { Id = "map08", Name = "三国峠", Width = 23, Height = 16, Players = 3, Ready = true,
+                Note = "3軍の基地はどれも同じ距離。下の軍は2軍に挟まれやすい代わりに、基地の近くに空港が2つある。" },
         };
 
         public static MapEntry Find(string id)

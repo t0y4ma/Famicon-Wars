@@ -226,12 +226,72 @@ namespace FamiconWars.Core
             }
         }
 
-        Army Foe => Army == Army.Red ? Army.Blue : Army.Red;
+        /// <summary>
+        /// The army this COM goes for (its base, its factories). Units of every other army are enemies all
+        /// the same (they are attacked and feared); this only steers where the army heads.
+        /// Two armies: the other one. More: chosen at the start of each phase (ChooseFoe).
+        /// </summary>
+        Army Foe = Army.None;   // set by Next before anything uses it
+
+        /// <summary>
+        /// Three or more armies: whoever is pushing into our territory first (defend), else the enemy that
+        /// is weakest for its distance — let the others wear each other down and take the weak one's base
+        /// (all its properties come with it). The choice is kept unless another enemy is clearly better,
+        /// so that the army does not turn back and forth.
+        /// </summary>
+        Army ChooseFoe(GameState s)
+        {
+            if (s.Players == 2) return Army == Army.Red ? Army.Blue : Army.Red;
+            int hq = -1;
+            for (int i = 0; i < s.Owner.Length; i++)
+                if (s.Owner[i] == Army && s.Data.Terrains[s.Terrain[i]].Id == "HQ") { hq = i; break; }
+            int hx = hq >= 0 ? hq % s.Width : s.Width / 2, hy = hq >= 0 ? hq / s.Width : s.Height / 2;
+            long mine = s.Funds[(int)Army];
+            var strength = new long[s.Players]; var threat = new long[s.Players]; var dist = new int[s.Players];
+            for (int a = 0; a < s.Players; a++) { strength[a] = s.Funds[a]; dist[a] = s.Width + s.Height; }
+            // what each army earns counts too (on day 1 the armies after us have no money yet, but are not weak)
+            for (int i = 0; i < s.Owner.Length; i++)
+                if (s.Owner[i] != Army.None) strength[(int)s.Owner[i]] += 3L * s.Data.Terrains[s.Terrain[i]].Income;
+            mine += strength[(int)Army] - s.Funds[(int)Army];
+            int reach = Math.Max(8, (s.Width + s.Height) / 5);
+            foreach (var u in s.Units)
+            {
+                if (u.Army == Army.None) continue;
+                long v = (long)s.Def(u).Price * u.Hp / 100;
+                if (u.Army == Army) { mine += v; continue; }
+                strength[(int)u.Army] += v;
+                if (!u.IsCarried && Math.Abs(u.X - hx) + Math.Abs(u.Y - hy) <= reach) threat[(int)u.Army] += v;
+            }
+            for (int i = 0; i < s.Owner.Length; i++)
+            {
+                var o = s.Owner[i];
+                if (o == Army.None || o == Army || s.Data.Terrains[s.Terrain[i]].Id != "HQ") continue;
+                dist[(int)o] = Math.Min(dist[(int)o], Math.Abs(i % s.Width - hx) + Math.Abs(i / s.Width - hy));
+            }
+            // the army running away with the game: everyone else should hold it back
+            long total = mine; int alive = 1;
+            for (int a = 0; a < s.Players; a++) if (a != (int)Army && !s.Out[a]) { total += strength[a]; alive++; }
+            float avg = total / (float)Math.Max(1, alive);
+            Army best = Army.None; float bestScore = float.MinValue, current = float.MinValue;
+            for (int k = 1; k < s.Players; k++)
+            {
+                var e = (Army)(((int)Army + k) % s.Players);
+                if (s.IsOut(e)) continue;
+                float weak = (mine + 1f) / (strength[(int)e] + 1f);          // > 1: we are stronger
+                float leader = Math.Max(0f, strength[(int)e] / Math.Max(1f, avg) - 1.15f) * 4f;
+                float sc = 3f * threat[(int)e] / Math.Max(1f, mine) + Math.Min(weak, 3f) + leader - dist[(int)e] / (float)(s.Width + s.Height) * 2f;
+                if (e == Foe) current = sc;
+                if (sc > bestScore) { bestScore = sc; best = e; }
+            }
+            if (current > float.MinValue && bestScore < current + 0.35f) return Foe;   // keep course unless clearly better
+            return best;
+        }
 
         public Command Next(GameState s)
         {
             if (s.GameOver || s.Active != Army) return null;
-            int key = s.Day * 2 + (int)s.Active;
+            int key = s.Day * s.Players + (int)s.Active;
+            if (key != phaseKey || Foe == Army.None || s.IsOut(Foe)) Foe = ChooseFoe(s);
             if (key != phaseKey)
             {
                 phaseKey = key; commandsThisPhase = 0; resupplyConsidered = false; savingThisPhase = false; lateCapThisPhase = false; strategicPlanned = false; strategic = null;
@@ -1115,14 +1175,18 @@ namespace FamiconWars.Core
         int HqDistance(GameState s)
         {
             if (hqDistance >= 0) return hqDistance;
-            int mine = -1, theirs = -1;
+            int mine = -1;
+            var theirs = new List<int>();
             for (int i = 0; i < s.Owner.Length; i++)
-                if (s.Data.Terrains[s.Terrain[i]].Id == "HQ") { if (s.Owner[i] == Army) mine = i; else if (s.Owner[i] != Army.None) theirs = i; }
+                if (s.Data.Terrains[s.Terrain[i]].Id == "HQ") { if (s.Owner[i] == Army) mine = i; else if (s.Owner[i] != Army.None) theirs.Add(i); }
             hqDistance = s.Width + s.Height;
-            if (mine >= 0 && theirs >= 0)
+            if (mine >= 0 && theirs.Count > 0)
             {
+                // the nearest enemy base (two armies: the enemy's)
                 var c = TerrainCost(s, MoveClass.Foot, new List<int> { mine });
-                if (c[theirs] < Inf) hqDistance = c[theirs];
+                int best = Inf;
+                foreach (var t in theirs) best = Math.Min(best, c[t]);
+                if (best < Inf) hqDistance = best;
             }
             return hqDistance;
         }
@@ -1138,14 +1202,14 @@ namespace FamiconWars.Core
         /// <summary>0..1: how far ahead in army value we are (0 below 1.2x, 1 from 1.6x).</summary>
         internal float Lead(GameState s)
         {
-            long mine = 0, theirs = 0;
+            // against the army we go for (two armies: the enemy). Money in the bank is an army about to
+            // appear (a COM saving up is not weak)
+            long mine = s.Funds[(int)Army], theirs = Foe != Army.None ? s.Funds[(int)Foe] : 0;
             foreach (var u in s.Units)
             {
                 long v = (long)s.Def(u).Price * u.Hp / 100;
-                if (u.Army == Army) mine += v; else theirs += v;
+                if (u.Army == Army) mine += v; else if (u.Army == Foe) theirs += v;
             }
-            // money in the bank is an army about to appear (a COM saving up is not weak)
-            mine += s.Funds[(int)Army]; theirs += s.Funds[1 - (int)Army];
             if (mine <= 0) return 0f;
             float ratio = theirs <= 0 ? 9f : mine / (float)theirs;
             return Clamp01((ratio - 1.2f) / 0.4f);
@@ -1177,6 +1241,9 @@ namespace FamiconWars.Core
             readonly float hold;                       // 0..1: fighting units keep to our half of the map (holding a line in the middle)   // the profile's weights, eased toward trading in a deadlock
             readonly float push;                       // 0..1: time to finish the enemy off (deadlock or a clear lead)
             readonly Army me, foe;
+            /// <summary>Any unit of another army is an enemy (three or more armies); foe is the army we go for.</summary>
+            bool IsEnemy(UnitState e) => e.Army != me && e.Army != Army.None;
+            bool EnemyOwned(int tile) => s.Owner[tile] != me && s.Owner[tile] != Army.None;
             readonly int w;
             List<(UnitState e, HashSet<int> tiles)> enemyReach;
             readonly Dictionary<string, int[]> dist = new Dictionary<string, int[]>();
@@ -1209,7 +1276,7 @@ namespace FamiconWars.Core
                     if (s.Owner[i] == me && s.Data.Terrains[s.Terrain[i]].Id == "HQ") OwnHq = i;
                 if (OwnHq >= 0 && p.Has(AiFeature.Guard))
                     foreach (var e in s.Units)
-                        if (e.Army == foe && !e.IsCarried && s.Def(e).Capture >= 2 &&
+                        if (IsEnemy(e) && !e.IsCarried && s.Def(e).Capture >= 2 &&
                             Movement.Distance(e.X, e.Y, OwnHq % w, OwnHq / w) <= s.Def(e).Move + p.GuardRange) hqDanger = true;
             }
 
@@ -1232,7 +1299,7 @@ namespace FamiconWars.Core
                     bool engaged = false, canKill = false;
                     foreach (var e in s.Units)
                     {
-                        if (e.Army != foe || e.IsCarried || Movement.Distance(e.X, e.Y, weak.X, weak.Y) != 1) continue;
+                        if (!IsEnemy(e) || e.IsCarried || Movement.Distance(e.X, e.Y, weak.X, weak.Y) != 1) continue;
                         engaged = true;
                         if (weak.Ammo > 0 && Combat.CanAttackFrom(s, weak, e, weak.X, weak.Y, false) &&
                             Combat.Predict(s, weak, weak.X, weak.Y, e).DamageToDefenderMin >= e.Hp) canKill = true;
@@ -1246,12 +1313,12 @@ namespace FamiconWars.Core
                         var fd = s.Def(f);
                         if (fd.Domain != Domain.Ground || fd.IsIndirect || fd.RangeMax <= 0) continue;
                         bool busy = false;
-                        foreach (var e in s.Units) if (e.Army == foe && !e.IsCarried && Movement.Distance(e.X, e.Y, f.X, f.Y) == 1) { busy = true; break; }
+                        foreach (var e in s.Units) if (IsEnemy(e) && !e.IsCarried && Movement.Distance(e.X, e.Y, f.X, f.Y) == 1) { busy = true; break; }
                         if (busy || !Movement.Reachable(s, f).Reaches(wi)) continue;
                         if (s.TerrainAt(weak.X, weak.Y).Cost[(int)fd.MoveClass] < 0) continue;
                         bool target = false;
                         foreach (var e in s.Units)
-                            if (e.Army == foe && !e.IsCarried && Movement.Distance(e.X, e.Y, weak.X, weak.Y) == 1 && s.Data.BaseDamage(fd, s.Def(e)) > 0) { target = true; break; }
+                            if (IsEnemy(e) && !e.IsCarried && Movement.Distance(e.X, e.Y, weak.X, weak.Y) == 1 && s.Data.BaseDamage(fd, s.Def(e)) > 0) { target = true; break; }
                         if (!target) continue;
                         // the fresh unit must trade better from that tile than the battered one would (it usually does:
                         // a full-strength unit hits harder and the battered one would just be a cheap kill next phase)
@@ -1266,7 +1333,7 @@ namespace FamiconWars.Core
                         int i = kv.Key, x = i % w, y = i / w;
                         if (i == wi || reach.EndOnly.Contains(i) || Movement.StopAt(s, weak, x, y) != StopKind.Empty) continue;
                         bool adj = false;
-                        foreach (var e in s.Units) if (e.Army == foe && !e.IsCarried && Movement.Distance(e.X, e.Y, x, y) == 1) { adj = true; break; }
+                        foreach (var e in s.Units) if (IsEnemy(e) && !e.IsCarried && Movement.Distance(e.X, e.Y, x, y) == 1) { adj = true; break; }
                         if (adj) continue;
                         var t = s.TerrainAt(x, y);
                         float sc = -Threat(weak, x, y, weak.Hp) + t.DefenseFor(d) * 5;
@@ -1290,7 +1357,7 @@ namespace FamiconWars.Core
                 float best = float.MinValue;
                 foreach (var e in s.Units)
                 {
-                    if (e.Army != foe || e.IsCarried || !Combat.CanAttackFrom(s, ghost, e, x, y, moved)) continue;
+                    if (!IsEnemy(e) || e.IsCarried || !Combat.CanAttackFrom(s, ghost, e, x, y, moved)) continue;
                     var f = Combat.Predict(s, ghost, x, y, e);
                     float dmg = (f.DamageToDefenderMin + f.DamageToDefenderMax) / 2f, cd = f.Counter ? (f.DamageToAttackerMin + f.DamageToAttackerMax) / 2f : 0;
                     best = Math.Max(best, dmg / 100f * Value(e) - cd / 100f * Value(u));
@@ -1400,7 +1467,7 @@ namespace FamiconWars.Core
                         var ghost = u.Clone(); ghost.X = x; ghost.Y = y;
                         foreach (var e in s.Units)
                         {
-                            if (e.Army != foe || e.IsCarried) continue;
+                            if (!IsEnemy(e) || e.IsCarried) continue;
                             if (!Combat.CanAttackFrom(s, ghost, e, x, y, moved)) continue;
                             var f = Combat.Predict(s, ghost, x, y, e);
                             int dmg = (f.DamageToDefenderMin + f.DamageToDefenderMax) / 2;
@@ -1477,7 +1544,7 @@ namespace FamiconWars.Core
                         float pv = PropValue(ci);
                         foreach (var e in s.Units)
                         {
-                            if (e.Army != foe || e.IsCarried || e.Ammo <= 0) continue;
+                            if (!IsEnemy(e) || e.IsCarried || e.Ammo <= 0) continue;
                             var ed = s.Def(e);
                             if (ed.Domain != Domain.Ground || ed.IsIndirect || ed.RangeMax < 1 || s.Data.BaseDamage(ed, cd) < 0) continue;
                             if (Movement.Distance(e.X, e.Y, c.X, c.Y) > ed.Move + 1) continue;
@@ -1722,7 +1789,7 @@ namespace FamiconWars.Core
                 int n = 0;
                 foreach (var e in s.Units)
                 {
-                    if (e.Army != foe || e.IsCarried || s.Def(e).RangeMax <= 0) continue;
+                    if (!IsEnemy(e) || e.IsCarried || s.Def(e).RangeMax <= 0) continue;
                     int i = s.Index(e.X, e.Y);
                     if (own[i] < Inf && theirs[i] < Inf && own[i] <= theirs[i] && ++n >= 3) return true;
                 }
@@ -1754,7 +1821,7 @@ namespace FamiconWars.Core
                 enemyReach = new List<(UnitState, HashSet<int>)>();
                 foreach (var e in s.Units)
                 {
-                    if (e.Army != foe || e.IsCarried || e.Ammo <= 0) continue;
+                    if (!IsEnemy(e) || e.IsCarried || e.Ammo <= 0) continue;
                     var d = s.Def(e);
                     if (d.RangeMax <= 0) continue;
                     var set = new HashSet<int>();
@@ -1842,7 +1909,7 @@ namespace FamiconWars.Core
                         MoveResult reach = d.IsIndirect ? null : Movement.Reachable(s, u);
                         foreach (var e in s.Units)
                         {
-                            if (e.Army != foe || e.IsCarried || s.Data.BaseDamage(d, s.Def(e)) < 0) continue;
+                            if (!IsEnemy(e) || e.IsCarried || s.Data.BaseDamage(d, s.Def(e)) < 0) continue;
                             bool can = false;
                             if (d.IsIndirect) can = Combat.CanAttackFrom(s, u, e, u.X, u.Y, false);
                             else
@@ -1866,10 +1933,10 @@ namespace FamiconWars.Core
             float PropValue(int i)
             {
                 var t = s.Data.Terrains[s.Terrain[i]];
-                if (t.Id == "HQ") return s.Owner[i] == foe ? 30000 : 0;
+                if (t.Id == "HQ") return EnemyOwned(i) ? 30000 : 0;
                 float v = 1500 + t.Income * 4;
                 if (t.Produces != null) v += 800;
-                if (s.Owner[i] == foe) v *= 1.5f;
+                if (EnemyOwned(i)) v *= 1.5f;
                 return v;
             }
 
@@ -1934,7 +2001,7 @@ namespace FamiconWars.Core
                 if (np >= goal)
                 {
                     sc += pv * 0.6f;
-                    if (s.Data.Terrains[s.Terrain[i]].Id == "HQ" && s.Owner[i] == foe) sc += 1e7f;
+                    if (s.Data.Terrains[s.Terrain[i]].Id == "HQ" && EnemyOwned(i)) sc += 1e7f;   // any enemy base: that army is out
                 }
                 return sc;
             }
@@ -2187,7 +2254,7 @@ namespace FamiconWars.Core
                 {
                     var ad = s.Data.Units[int.Parse(key.Substring(6))];
                     foreach (var e in s.Units)
-                        if (e.Army == foe && !e.IsCarried && s.Data.BaseDamage(ad, s.Def(e)) >= 0) src.Add(s.Index(e.X, e.Y));
+                        if (IsEnemy(e) && !e.IsCarried && s.Data.BaseDamage(ad, s.Def(e)) >= 0) src.Add(s.Index(e.X, e.Y));
                     if (ad.Domain == Domain.Ground)
                         for (int i = 0; i < n; i++)
                             if (s.Owner[i] == foe && s.Data.Terrains[s.Terrain[i]].Id == "HQ") src.Add(i);

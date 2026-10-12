@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using FamiconWars.Core;
 using UnityEngine;
 
@@ -6,7 +6,7 @@ namespace FamiconWars.Game
 {
     /// <summary>
     /// Pixel-art unit icons (32x32, facing right) from Resources/Units/units.png:
-    /// one column per unit type, red army on the top row, blue on the bottom row.
+    /// one column per unit type, one row per army in turn order (red on top).
     /// </summary>
     public static class UnitIcons
     {
@@ -18,7 +18,8 @@ namespace FamiconWars.Game
         /// <summary>The icon for a unit type and army, or null if the atlas has no such column.</summary>
         public static Sprite Get(string unitId, Army army)
         {
-            string key = unitId + (army == Army.Blue ? "_b" : "_r");
+            if (army == Army.None) army = Army.Red;
+            string key = unitId + "_" + (int)army;
             if (cache.TryGetValue(key, out var sp)) return sp;
             if (atlas == null)
             {
@@ -29,7 +30,8 @@ namespace FamiconWars.Game
             }
             int col = System.Array.IndexOf(Order, unitId);
             if (col < 0) return null;
-            int row = army == Army.Blue ? 0 : 1;   // texture rows count from the bottom
+            int rows = atlas.height / Cell;
+            int row = rows - 1 - ((int)army % rows);   // texture rows count from the bottom
             sp = Sprite.Create(atlas, new Rect(col * Cell, row * Cell, Cell, Cell), new Vector2(0.5f, 0.5f), Cell);
             sp.name = key;
             cache[key] = sp;

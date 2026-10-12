@@ -39,6 +39,8 @@ namespace FamiconWars.Core
         public int Width, Height;
         public int[] Tiles;        // terrain index per tile
         public Army[] Owners;      // initial owner per tile
+        /// <summary>Armies in this map (2 or more): the highest army that owns a tile or a unit, plus one.</summary>
+        public int Players = 2;
         public List<(string type, Army army, int x, int y, int hp)> Units = new List<(string, Army, int, int, int)>();
 
         /// <summary>Parses the text format used in Resources/Maps.</summary>
@@ -79,8 +81,12 @@ namespace FamiconWars.Core
                 {
                     m.Tiles[y * m.Width + x] = data.TerrainByChar(tileRows[y][x]).Index;
                     char o = y < ownerRows.Count && x < ownerRows[y].Length ? ownerRows[y][x] : '.';
-                    m.Owners[y * m.Width + x] = o == 'r' ? Army.Red : o == 'b' ? Army.Blue : Army.None;
+                    m.Owners[y * m.Width + x] = Armies.FromLetter(o);
                 }
+            int top = (int)Army.Blue;
+            foreach (var a in m.Owners) top = Math.Max(top, (int)a);
+            foreach (var u in m.Units) top = Math.Max(top, (int)u.army);
+            m.Players = top + 1;
             return m;
         }
     }
@@ -95,9 +101,15 @@ namespace FamiconWars.Core
         public int[] CaptureProgress;
         public int[] CapturingUnit;
         public List<UnitState> Units = new List<UnitState>();
+        /// <summary>Armies taking part: 0..Players-1, in turn order.</summary>
+        public int Players = 2;
         public int[] Funds = new int[2];
         public bool[] ResupplyUsed = new bool[2];
         public bool[] HadUnits = new bool[2];
+        /// <summary>Armies knocked out of the game (base taken, routed or surrendered).</summary>
+        public bool[] Out = new bool[2];
+        /// <summary>Knocked-out armies, first out first: the ranking from the bottom.</summary>
+        public List<Army> Eliminated = new List<Army>();
         public int Day = 1;
         public Army Active = Army.Red;
         public Rng Rng;
@@ -106,6 +118,19 @@ namespace FamiconWars.Core
         public Army Winner = Army.None;
         /// <summary>Damage taken multiplier (%) per army; IQ200 COM uses &lt;100.</summary>
         public int[] DamageTakenPct = { 100, 100 };
+
+        public bool IsOut(Army a) => a == Army.None || Out[(int)a];
+        public int AliveCount { get { int n = 0; for (int a = 0; a < Players; a++) if (!Out[a]) n++; return n; } }
+        /// <summary>The other armies still in the game.</summary>
+        public IEnumerable<Army> Enemies(Army me) { for (int a = 0; a < Players; a++) if (a != (int)me && !Out[a]) yield return (Army)a; }
+
+        void SizeFor(int players)
+        {
+            Players = players;
+            Funds = new int[players]; ResupplyUsed = new bool[players]; HadUnits = new bool[players]; Out = new bool[players];
+            DamageTakenPct = new int[players];
+            for (int a = 0; a < players; a++) DamageTakenPct[a] = 100;
+        }
 
         public Rules Rules => Data.Rules;
         public bool InBounds(int x, int y) => x >= 0 && y >= 0 && x < Width && y < Height;
@@ -121,7 +146,11 @@ namespace FamiconWars.Core
             return null;
         }
 
-        public static GameState Create(GameData data, MapDef map, uint seed)
+        /// <summary>
+        /// A new game on the map. seated (optional, one entry per army of the map): armies left out
+        /// (false) do not play: they start out of the game, with their properties neutral and no units.
+        /// </summary>
+        public static GameState Create(GameData data, MapDef map, uint seed, IList<bool> seated = null)
         {
             var s = new GameState
             {
@@ -131,8 +160,17 @@ namespace FamiconWars.Core
                 Rng = new Rng(seed)
             };
             for (int i = 0; i < s.CapturingUnit.Length; i++) s.CapturingUnit[i] = -1;
-            s.Funds[0] = s.Funds[1] = data.Rules.StartFunds;
-            foreach (var mu in map.Units) s.SpawnUnit(data.Unit(mu.type).Index, mu.army, mu.x, mu.y, mu.hp, false);
+            s.SizeFor(Math.Max(2, map.Players));
+            for (int a = 0; a < s.Players; a++) s.Funds[a] = data.Rules.StartFunds;
+            if (seated != null)
+                for (int a = 0; a < s.Players; a++)
+                    if (a >= seated.Count || !seated[a])
+                    {
+                        s.Out[a] = true;
+                        for (int i = 0; i < s.Owner.Length; i++) if (s.Owner[i] == (Army)a) s.Owner[i] = Army.None;
+                    }
+            foreach (var mu in map.Units)
+                if (mu.army == Army.None || !s.Out[(int)mu.army]) s.SpawnUnit(data.Unit(mu.type).Index, mu.army, mu.x, mu.y, mu.hp, false);
             return s;
         }
 
@@ -156,6 +194,8 @@ namespace FamiconWars.Core
             s.ResupplyUsed = (bool[])ResupplyUsed.Clone();
             s.HadUnits = (bool[])HadUnits.Clone();
             s.DamageTakenPct = (int[])DamageTakenPct.Clone();
+            s.Out = (bool[])Out.Clone();
+            s.Eliminated = new List<Army>(Eliminated);
             s.Units = new List<UnitState>(Units.Count);
             foreach (var u in Units) s.Units.Add(u.Clone());
             return s;

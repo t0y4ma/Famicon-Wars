@@ -25,7 +25,7 @@ namespace FamiconWars.Tests
             mapText = File.ReadAllText(Path.Combine(Application.dataPath, "Resources/Maps/map01.txt"));
             inbox = new Dictionary<int, List<ServerMsg>>();
             seed = 99;
-            server = new OnlineRoomServer(data, id => id == "map01" || id == "map05" ? MapDef.Parse(id == "map01" ? mapText : File.ReadAllText(Path.Combine(Application.dataPath, "Resources/Maps/map05.txt")), data) : null,
+            server = new OnlineRoomServer(data, id => id == "map01" || id == "map05" || id == "map07" || id == "map08" ? MapDef.Parse(File.ReadAllText(Path.Combine(Application.dataPath, "Resources/Maps/" + id + ".txt")), data) : null,
                 (c, m) => { if (!inbox.TryGetValue(c, out var l)) inbox[c] = l = new List<ServerMsg>(); l.Add(m); },
                 () => seed = seed * 1664525u + 1013904223u, 1);
         }
@@ -539,6 +539,95 @@ namespace FamiconWars.Tests
             Assert.AreEqual(CommandCodec.Encode(p), CommandCodec.Encode(CommandCodec.Decode(CommandCodec.Encode(p))));
             Assert.IsNull(CommandCodec.Decode("U,5,1,1,1,1,1,1,1,1"), "army out of range");
             Assert.IsNull(CommandCodec.Decode("X,0"));
+        }
+
+        // ---------- three or more armies ----------
+
+        [Test]
+        public void AFourArmyRoomCanStartWithAnEmptySeat()
+        {
+            server.Create(1, "tokA", "Aさん", "map07");
+            var code = Last<RoomStatus>(1).Code;
+            Assert.AreEqual(4, Last<RoomStatus>(1).SeatCount);
+            server.Join(2, code, "tokB", "Bさん");
+            Assert.AreEqual(1, Last<RoomStatus>(2).MySeat);
+            server.Action(1, "bot", 3, "2");          // yellow: a BOT; green stays empty
+            server.Action(1, "turntime", 45, null);
+            server.Action(1, "start", 0, null);
+            var room = server.Find(code);
+            Assert.IsTrue(room.Started, Box(1).OfType<LobbyError>().LastOrDefault()?.Error);
+            var log = Last<GameLog>(2);
+            Assert.AreEqual("1101", log.Seated);
+            Assert.AreEqual(45, log.TurnSeconds);
+            Assert.IsTrue(room.State.IsOut(Army.Green), "the empty seat does not play");
+            var rep = new OnlineReplica();
+            rep.Rebuild(data, MapDef.Parse(File.ReadAllText(Path.Combine(Application.dataPath, "Resources/Maps/map07.txt")), data), log.Cmds, log.Seeds, log.Seated);
+            Assert.AreEqual(CommandCodec.Hash(room.State), CommandCodec.Hash(rep.State));
+            // red and blue end their phases; the host plays the yellow BOT
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+            server.Play(2, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Blue }));
+            Assert.AreEqual(Army.Yellow, room.State.Active, "green is skipped");
+            // the host sends the yellow BOT's move: armies past blue go over the wire too
+            Assert.IsNotNull(CommandCodec.Decode("E,3"));
+            server.BotPlay(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Yellow }));
+            Assert.IsFalse(room.BotsOnServer, "the yellow BOT's move was accepted");
+            Assert.AreEqual(Army.Red, room.State.Active);
+            Assert.AreEqual(2, room.State.Day);
+            foreach (var a in Box(2).OfType<Applied>()) Assert.IsNotNull(rep.Step(a.Index, a.Cmd, a.Seed, a.Hash));
+        }
+
+        [Test]
+        public void AMapForFewerArmiesSendsTheExtraSeatsToWatch()
+        {
+            server.Create(1, "tokA", "Aさん", "map07");
+            var code = Last<RoomStatus>(1).Code;
+            server.Join(2, code, "tokB", "Bさん");
+            server.Join(3, code, "tokC", "Cさん");
+            Assert.AreEqual(2, Last<RoomStatus>(3).MySeat);
+            server.Action(1, "map", 0, "map01");
+            Assert.AreEqual(2, Last<RoomStatus>(3).SeatCount);
+            Assert.AreEqual(-1, Last<RoomStatus>(3).MySeat, "seat 3 is gone: they watch");
+            server.Action(1, "sit", 2, null);
+            Assert.IsNotNull(Last<LobbyError>(1), "no third seat on a map for two");
+        }
+
+        [Test]
+        public void TheServerEndsAPhaseWhenTheTimeRunsOut()
+        {
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Join(2, code, "tokB", "Bさん");
+            server.Action(1, "turntime", 20, null);
+            server.Tick(100);
+            server.Action(1, "start", 0, null);
+            var room = server.Find(code);
+            server.Tick(110);
+            Assert.AreEqual(Army.Red, room.State.Active);
+            server.Tick(100 + 20 + server.TurnGrace + 0.5);
+            Assert.AreEqual(Army.Blue, room.State.Active, "red's 20 seconds are over");
+            server.Tick(100 + 30);
+            Assert.AreEqual(Army.Blue, room.State.Active, "blue's clock started when its phase did");
+        }
+
+        [Test]
+        public void APlayerWhoDroppedOutGetsAStandInUntilBack()
+        {
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Join(2, code, "tokB", "Bさん");
+            server.Tick(0);
+            server.Action(1, "start", 0, null);
+            var room = server.Find(code);
+            server.Disconnected(1);                  // red, whose phase it is, drops out
+            server.Tick(10);
+            Assert.IsNull(room.Proxies[0], "a short drop-out is waited for");
+            double t = 10 + server.AwayGrace;
+            for (int i = 0; i < 400 && room.State.Active == Army.Red; i++) { t += server.BotInterval; server.Tick(t); }
+            Assert.IsTrue(Last<RoomStatus>(2).SeatProxy[0], "the others see that a COM stands in");
+            Assert.AreEqual(Army.Blue, room.State.Active, "the stand-in played red's phase to the end");
+            server.Join(5, code, "tokA", "Aさん");     // back (same browser)
+            Assert.IsNull(room.Proxies[0]);
+            Assert.IsFalse(Last<RoomStatus>(5).SeatProxy[0]);
         }
     }
 }

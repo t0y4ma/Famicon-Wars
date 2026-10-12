@@ -6,7 +6,7 @@ namespace FamiconWars.Game
 {
     /// <summary>
     /// Pixel-art property tiles (32x32, the whole square) from Resources/Tiles/tiles.png:
-    /// columns HQ, FACTORY, CITY, AIRPORT, PORT; rows (top to bottom) red, blue, neutral.
+    /// columns HQ, FACTORY, CITY, AIRPORT, PORT; rows (top to bottom) one per army in turn order, then neutral.
     /// The roof / flag shows who owns the property.
     /// </summary>
     public static class TileIcons
@@ -30,7 +30,8 @@ namespace FamiconWars.Game
             }
             int col = System.Array.IndexOf(Order, terrainId);
             if (col < 0) return null;
-            int row = owner == Army.Red ? 2 : owner == Army.Blue ? 1 : 0;   // texture rows count from the bottom
+            int rows = atlas.height / Cell;   // texture rows count from the bottom: neutral is row 0
+            int row = owner == Army.None ? 0 : rows - 1 - ((int)owner % (rows - 1));
             sp = Sprite.Create(atlas, new Rect(col * Cell, row * Cell, Cell, Cell), new Vector2(0.5f, 0.5f), Cell);
             sp.name = key;
             cache[key] = sp;

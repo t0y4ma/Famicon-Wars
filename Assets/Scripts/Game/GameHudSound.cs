@@ -20,7 +20,11 @@ namespace FamiconWars.Game
         TextMeshProUGUI soundBgmVal, soundSeVal;
 
         /// <summary>A horizontal 0-100 slider with its value shown on the right.</summary>
-        Slider MakeSlider(string name, RectTransform parent, Vector2 pos, float width, out TextMeshProUGUI value, Action<int> changed, Action released)
+        /// <param name="min">Slider range (whole numbers), 0..100 by default.</param>
+        /// <param name="format">Text shown for a value (default: the number).</param>
+        /// <param name="valueWidth">Room for that text at the right end.</param>
+        Slider MakeSlider(string name, RectTransform parent, Vector2 pos, float width, out TextMeshProUGUI value, Action<int> changed, Action released,
+            int min = 0, int max = 100, Func<int, string> format = null, float valueWidth = 80)
         {
             var root = new GameObject(name, typeof(RectTransform)).GetComponent<RectTransform>();
             root.SetParent(parent, false);
@@ -28,7 +32,7 @@ namespace FamiconWars.Game
 
             var track = Panel("Track", root, PlateEdge);
             track.anchorMin = new Vector2(0, 0.5f); track.anchorMax = new Vector2(1, 0.5f); track.pivot = new Vector2(0.5f, 0.5f);
-            track.offsetMin = new Vector2(12, -5); track.offsetMax = new Vector2(-112, 5);
+            track.offsetMin = new Vector2(12, -5); track.offsetMax = new Vector2(-(valueWidth + 32), 5);
 
             var fillArea = new GameObject("FillArea", typeof(RectTransform)).GetComponent<RectTransform>();
             fillArea.SetParent(track, false);
@@ -49,25 +53,29 @@ namespace FamiconWars.Game
             var s = track.gameObject.AddComponent<Slider>();
             s.fillRect = fill; s.handleRect = handle; s.targetGraphic = himg;
             s.direction = Slider.Direction.LeftToRight;
-            s.minValue = 0; s.maxValue = 100; s.wholeNumbers = true;
+            s.minValue = min; s.maxValue = max; s.wholeNumbers = true;
             var cb = s.colors;
             cb.normalColor = Paper; cb.highlightedColor = Hex("#FFE9A8"); cb.pressedColor = Brass; cb.selectedColor = Hex("#FFE9A8");
             cb.fadeDuration = 0.06f;
             s.colors = cb;
 
             var val = Label("Value", root, SizeBody, Paper, TextAlignmentOptions.MidlineRight, true);
-            Pin(val.rectTransform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), Vector2.zero, new Vector2(80, 44), pivot: new Vector2(1, 0.5f));
+            Pin(val.rectTransform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), Vector2.zero, new Vector2(valueWidth, 44), pivot: new Vector2(1, 0.5f));
             value = val;
             var shown = val;
-            s.onValueChanged.AddListener(v => { shown.text = Mathf.RoundToInt(v).ToString(); changed(Mathf.RoundToInt(v)); });
+            var fmt = format ?? (v => v.ToString());
+            sliderFormats[s] = fmt;
+            s.onValueChanged.AddListener(v => { shown.text = fmt(Mathf.RoundToInt(v)); changed(Mathf.RoundToInt(v)); });
             if (released != null) track.gameObject.AddComponent<SliderRelease>().Released = released;
             return s;
         }
 
-        static void SetSlider(Slider s, TextMeshProUGUI value, int v)
+        readonly System.Collections.Generic.Dictionary<Slider, Func<int, string>> sliderFormats = new System.Collections.Generic.Dictionary<Slider, Func<int, string>>();
+
+        void SetSlider(Slider s, TextMeshProUGUI value, int v)
         {
             s.SetValueWithoutNotify(v);
-            value.text = v.ToString();
+            value.text = sliderFormats.TryGetValue(s, out var f) ? f(v) : v.ToString();
         }
 
         void BuildSoundPanel()
@@ -172,9 +180,12 @@ namespace FamiconWars.Game
     }
 
     /// <summary>Reports when the pointer lets go of a slider (to play a sample of the new volume once).</summary>
-    public sealed class SliderRelease : MonoBehaviour, IPointerUpHandler
+    public sealed class SliderRelease : MonoBehaviour, IPointerUpHandler, IPointerDownHandler
     {
         public Action Released;
-        public void OnPointerUp(PointerEventData e) => Released?.Invoke();
+        /// <summary>The handle is held (a status from the server must not move it under the mouse).</summary>
+        public bool Dragging { get; private set; }
+        public void OnPointerDown(PointerEventData e) => Dragging = true;
+        public void OnPointerUp(PointerEventData e) { Dragging = false; Released?.Invoke(); }
     }
 }

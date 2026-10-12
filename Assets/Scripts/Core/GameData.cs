@@ -5,7 +5,31 @@ namespace FamiconWars.Core
 {
     public enum MoveClass { Foot, Vehicle, Air, Ship }
     public enum Domain { Ground, Air, Sea }
-    public enum Army { None = -1, Red = 0, Blue = 1 }
+    /// <summary>
+    /// The armies, in turn order. To allow more than four, add a value here and a row to Armies.Info
+    /// (map letter, name); everything else is sized from Armies.Max / the map's own player count.
+    /// </summary>
+    public enum Army { None = -1, Red = 0, Blue = 1, Green = 2, Yellow = 3 }
+
+    public static class Armies
+    {
+        /// <summary>Map letter and display name, indexed by army.</summary>
+        static readonly (char letter, string name)[] Info =
+        {
+            ('r', "レッド軍"), ('b', "ブルー軍"), ('g', "グリーン軍"), ('y', "イエロー軍"),
+        };
+        public static int Max => Info.Length;
+        public static char Letter(Army a) => a == Army.None ? '.' : Info[(int)a].letter;
+        public static string Name(Army a) => a == Army.None ? "中立" : Info[(int)a].name;
+        /// <summary>The army for a map owner letter, or None.</summary>
+        public static Army FromLetter(char c)
+        {
+            for (int i = 0; i < Info.Length; i++) if (Info[i].letter == c) return (Army)i;
+            return Army.None;
+        }
+        /// <summary>Armies 0..players-1 in turn order.</summary>
+        public static IEnumerable<Army> All(int players) { for (int i = 0; i < players; i++) yield return (Army)i; }
+    }
 
     public sealed class UnitDef
     {

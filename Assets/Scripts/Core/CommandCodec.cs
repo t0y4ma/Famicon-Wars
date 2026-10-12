@@ -35,7 +35,7 @@ namespace FamiconWars.Core
                 int I(int k) => int.Parse(p[k], NumberStyles.Integer, CultureInfo.InvariantCulture);
                 if (p.Length < 2) return null;
                 int armyNo = I(1);
-                if (armyNo != 0 && armyNo != 1) return null;
+                if (armyNo < 0 || armyNo >= Armies.Max) return null;
                 var army = (Army)armyNo;
                 switch (p[0])
                 {

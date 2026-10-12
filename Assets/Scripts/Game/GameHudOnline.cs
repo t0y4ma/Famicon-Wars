@@ -15,12 +15,16 @@ namespace FamiconWars.Game
         public bool Started, GameOver, IAmHost, IsPublic;
         /// <summary>Seats, map and BOTs can change: before a match or once it is over.</summary>
         public bool Editable => !Started || GameOver;
-        public int MySeat;                        // 0 red, 1 blue, -1 watching
-        public SeatKind[] SeatKinds = new SeatKind[2];
-        public string[] SeatNames = new string[2];
-        public int[] SeatLevels = new int[2];
-        public int[] SeatStyles = new int[2];     // BOT 戦法: 0 random, 1-3
-        public bool[] SeatOnline = new bool[2];
+        public int MySeat;                        // army of my seat, -1 watching
+        public int SeatCount = 2;                 // armies of the room's map
+        public int TurnSeconds;                   // time for a person's phase (0 = no limit)
+        public SeatKind[] SeatKinds = new SeatKind[Armies.Max];
+        public string[] SeatNames = new string[Armies.Max];
+        public int[] SeatLevels = new int[Armies.Max];
+        public int[] SeatStyles = new int[Armies.Max];     // BOT 戦法: 0 random, 1-3
+        public bool[] SeatOnline = new bool[Armies.Max];
+        public bool[] SeatProxy = new bool[Armies.Max];    // a COM stands in for a player who dropped out
+        public int FilledSeats { get { int n = 0; for (int s = 0; s < SeatCount; s++) if (SeatKinds[s] != SeatKind.Empty) n++; return n; } }
         public readonly List<(int id, string name, int seat, bool online, bool host, bool me)> Members = new List<(int, string, int, bool, bool, bool)>();
     }
 
@@ -28,7 +32,7 @@ namespace FamiconWars.Game
     public struct RoomListEntry
     {
         public string Code, MapName, Host;
-        public int State, Members, SeatsTaken;
+        public int State, Members, SeatsTaken, SeatCount;
     }
 
     /// <summary>
@@ -45,6 +49,7 @@ namespace FamiconWars.Game
         public event Action<int> OnRoomSit, OnRoomHost, OnRoomMap;   // seat / member id / map step (-1, +1)
         public event Action<int, int> OnRoomBot;             // seat, level 0-4
         public event Action<int, int> OnRoomBotStyle;        // seat, 戦法 0 random / 1-3
+        public event Action<int> OnRoomTurnTime;             // seconds for a person's phase (0 = no limit)
         public event Action OnRoomStand, OnRoomStart, OnRoomLeave;
         public event Action<string> OnRoomRename;          // new display name
 
@@ -243,7 +248,7 @@ namespace FamiconWars.Game
                 Pin(name.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(124, -5), new Vector2(480, 26), pivot: new Vector2(0, 1));
                 var info = Label("Info", row, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
                 info.richText = true;
-                info.text = ListStates[Mathf.Clamp(e.State, 0, 2)] + "　席 " + e.SeatsTaken + "/2　" + e.Members + "人　部屋主 " + e.Host;
+                info.text = ListStates[Mathf.Clamp(e.State, 0, 2)] + "　席 " + e.SeatsTaken + "/" + Mathf.Max(2, e.SeatCount) + "　" + e.Members + "人　部屋主 " + e.Host;
                 Pin(info.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(124, -30), new Vector2(480, 26), pivot: new Vector2(0, 1));
                 string c = e.Code;
                 bool watch = e.State == 1;
@@ -341,10 +346,17 @@ namespace FamiconWars.Game
         bool roomStartReady;
         sealed class SeatParts
         {
+            public RectTransform Root;
             public Image Icon; public TextMeshProUGUI Who, State; public Button Sit, Bot;
             public Vector2 CardPos;
+            public bool Row;                       // a row of the list for three or more armies (else a big card)
         }
-        readonly SeatParts[] seatParts = new SeatParts[2];
+        // two armies: two big cards; three or more: one row per army
+        readonly SeatParts[] seatCards = new SeatParts[2];
+        readonly SeatParts[] seatRows = new SeatParts[Armies.Max];
+        SeatParts SeatPart(RoomView v, int s) => v.SeatCount > 2 ? seatRows[s] : seatCards[s];
+        Slider roomTurn;
+        TextMeshProUGUI roomTurnVal;
         const int MemberRows = 7;
         readonly TextMeshProUGUI[] memberRowLabels = new TextMeshProUGUI[MemberRows];
         readonly Button[] memberRowHost = new Button[MemberRows];
@@ -386,7 +398,19 @@ namespace FamiconWars.Game
             Pin((RectTransform)roomMapNext.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -14), new Vector2(60, 46), pivot: new Vector2(1, 1));
 
             // seats
-            for (int s = 0; s < 2; s++) seatParts[s] = BuildSeatCard(s, new Vector2(96 + s * 500, -150));
+            for (int s = 0; s < 2; s++) seatCards[s] = BuildSeatCard(s, new Vector2(96 + s * 500, -150));
+            for (int s = 0; s < Armies.Max; s++) seatRows[s] = BuildSeatRow(s, new Vector2(96, -150 - s * 76));
+
+            // time limit for a person's phase (the host sets it; the server keeps the time)
+            var turnPlate = Panel("TurnTime", roomBody, Plate);
+            Pin(turnPlate, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-96, -650), new Vector2(560, 150), pivot: new Vector2(1, 1));
+            Edge(turnPlate, PlateEdge);
+            var turnLabel = Label("Label", turnPlate, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
+            turnLabel.text = "制限時間(1手番)";
+            Pin(turnLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -16), new Vector2(400, 28), pivot: new Vector2(0, 1));
+            roomTurn = MakeSlider("TurnSlider", turnPlate, new Vector2(12, -56), 536, out roomTurnVal,
+                v => { }, () => OnRoomTurnTime?.Invoke(TurnTime.FromStep(Mathf.RoundToInt(roomTurn.value))),
+                0, TurnTime.Steps, v => TurnTime.Label(TurnTime.FromStep(v)), 130);
 
             // members
             var list = Panel("Members", roomBody, Plate);
@@ -463,11 +487,41 @@ namespace FamiconWars.Game
             botStrip.gameObject.SetActive(false);
         }
 
+        /// <summary>A seat as one row (rooms for three or more armies).</summary>
+        SeatParts BuildSeatRow(int s, Vector2 pos)
+        {
+            var p = new SeatParts { CardPos = pos, Row = true };
+            var army = (Army)s;
+            var row = Panel("SeatRow" + s, roomBody, PlateRaised);
+            p.Root = row;
+            Pin(row, new Vector2(0, 1), new Vector2(0, 1), pos, new Vector2(980, 64), pivot: new Vector2(0, 1));
+            var bar = Panel("Colour", row, ArmyColor(army));
+            bar.GetComponent<Image>().raycastTarget = false;
+            Pin(bar, new Vector2(0, 0), new Vector2(0, 1), Vector2.zero, new Vector2(10, 0), pivot: new Vector2(0, 0.5f), stretchY: true);
+            p.Icon = Panel("Icon", row, Color.white).GetComponent<Image>();
+            p.Icon.raycastTarget = false; p.Icon.preserveAspect = true;
+            Pin(p.Icon.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(46, 0), new Vector2(52, 52));
+            if (ArmyStyle.FacesLeft(army)) p.Icon.rectTransform.localScale = new Vector3(-1, 1, 1);
+            var head = Label("Army", row, SizeBody, ArmyTextColor(army), TextAlignmentOptions.MidlineLeft, true);
+            head.text = Labels.Army(army);
+            Pin(head.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(82, 0), new Vector2(170, 56), pivot: new Vector2(0, 0.5f));
+            p.Who = Label("Who", row, SizeBody, Paper, TextAlignmentOptions.MidlineLeft, true);
+            Pin(p.Who.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(256, 0), new Vector2(300, 56), pivot: new Vector2(0, 0.5f));
+            p.State = Label("State", row, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
+            Pin(p.State.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(560, 0), new Vector2(170, 56), pivot: new Vector2(0, 0.5f));
+            p.Sit = MakeButton("Sit", row, "座る", true, () => OnRoomSit?.Invoke(s));
+            Pin((RectTransform)p.Sit.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(736, -8), new Vector2(96, 48), pivot: new Vector2(0, 1));
+            p.Bot = MakeButton("Bot", row, "BOT", false, () => SetBotMenu(botMenuSeat == s ? -1 : s));
+            Pin((RectTransform)p.Bot.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(840, -8), new Vector2(132, 48), pivot: new Vector2(0, 1));
+            return p;
+        }
+
         SeatParts BuildSeatCard(int s, Vector2 pos)
         {
             var p = new SeatParts { CardPos = pos };
             var army = (Army)s;
             var card = Panel("Seat" + s, roomBody, PlateRaised);
+            p.Root = card;
             Pin(card, new Vector2(0, 1), new Vector2(0, 1), pos, new Vector2(480, 300), pivot: new Vector2(0, 1));
             var tab = Panel("Tab", card, ArmyColor(army));
             tab.GetComponent<Image>().raycastTarget = false;
@@ -478,7 +532,7 @@ namespace FamiconWars.Game
             p.Icon = Panel("Icon", card, Color.white).GetComponent<Image>();
             p.Icon.raycastTarget = false; p.Icon.preserveAspect = true;
             Pin(p.Icon.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(72, -118), new Vector2(96, 96), pivot: new Vector2(0.5f, 0.5f));
-            if (s == 1) p.Icon.rectTransform.localScale = new Vector3(-1, 1, 1);
+            if (ArmyStyle.FacesLeft(army)) p.Icon.rectTransform.localScale = new Vector3(-1, 1, 1);
             p.Who = Label("Who", card, SizeTitle - 4, Paper, TextAlignmentOptions.MidlineLeft, true);
             Pin(p.Who.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(136, -78), new Vector2(320, 48), pivot: new Vector2(0, 1));
             p.State = Label("State", card, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
@@ -526,7 +580,14 @@ namespace FamiconWars.Game
             SetActive(roomMapPrev, v.IAmHost && v.Editable);
             SetActive(roomMapNext, v.IAmHost && v.Editable);
 
-            for (int s = 0; s < 2; s++) UpdateSeat(v, s);
+            // two armies: the two cards; three or more: a row per army of the map
+            for (int s = 0; s < 2; s++) SetActive(seatCards[s].Root, v.SeatCount == 2);
+            for (int s = 0; s < Armies.Max; s++) SetActive(seatRows[s].Root, v.SeatCount > 2 && s < v.SeatCount);
+            for (int s = 0; s < v.SeatCount; s++) UpdateSeat(v, s);
+            // time limit: the host moves the slider, everyone sees it
+            var drag = roomTurn.GetComponent<SliderRelease>();
+            if (drag == null || !drag.Dragging) SetSlider(roomTurn, roomTurnVal, TurnTime.ToStep(v.TurnSeconds));
+            if (roomTurn.interactable != (v.IAmHost && v.Editable)) roomTurn.interactable = v.IAmHost && v.Editable;
 
             // my name: filled in from the room, unless the player is typing a new one
             foreach (var m in v.Members)
@@ -542,14 +603,14 @@ namespace FamiconWars.Game
                 if (!has) continue;
                 var m = v.Members[k];
                 memberRowIds[k] = m.id;
-                string role = m.seat == 0 ? "<color=#FF8A7E>レッド軍</color>" : m.seat == 1 ? "<color=#8FB2FF>ブルー軍</color>" : "観戦";
+                string role = m.seat >= 0 ? "<color=" + ArmyStyle.TextHex((Army)m.seat) + ">" + Labels.Army((Army)m.seat) + "</color>" : "観戦";
                 SetText(memberRowLabels[k], (m.host ? "<color=#D8A23A>★</color> " : "　 ") + m.name + (m.me ? "<color=#A3AC92>(あなた)</color>" : "") + "　" + role + (m.online ? "" : "<color=#A3AC92>(接続待ち)</color>"));
                 memberRowLabels[k].color = m.online ? Paper : Muted;
             }
 
             // footer
             SetActive(roomStand, v.Editable && v.MySeat >= 0);
-            bool ready = v.SeatKinds[0] != SeatKind.Empty && v.SeatKinds[1] != SeatKind.Empty;
+            bool ready = v.SeatCount == 2 ? v.SeatKinds[0] != SeatKind.Empty && v.SeatKinds[1] != SeatKind.Empty : v.FilledSeats >= 2;
             bool canStart = v.IAmHost && v.Editable;
             SetActive(roomStart, canStart);
             if (canStart)
@@ -565,7 +626,8 @@ namespace FamiconWars.Game
             bool watch = v.Started && !v.GameOver;
             SetActive(roomWatch, watch);
             if (watch) SetText(roomWatch.GetComponentInChildren<TextMeshProUGUI>(), v.MySeat >= 0 ? "対戦に戻る" : "観戦に戻る");
-            SetText(roomHint, canStart ? (ready ? "" : "両方の席が埋まると開始できます(空席には BOT も置けます)")
+            SetText(roomHint, canStart ? (ready ? (v.SeatCount > 2 && v.FilledSeats < v.SeatCount ? "空いた席の軍は参加しません" : "")
+                    : v.SeatCount == 2 ? "両方の席が埋まると開始できます(空席には BOT も置けます)" : "2つ以上の席が埋まると開始できます(空席には BOT も置けます)")
                 : v.Editable ? "部屋主が対戦を始めるのを待っています" : "");
 
             UpdateBotMenu(v);
@@ -574,7 +636,7 @@ namespace FamiconWars.Game
 
         void UpdateSeat(RoomView v, int s)
         {
-            var p = seatParts[s];
+            var p = SeatPart(v, s);
             var army = (Army)s;
             var kind = v.SeatKinds[s];
             p.Icon.sprite = UnitIcons.Get(kind == SeatKind.Bot ? "TANK_A" : "INF", army);
@@ -582,7 +644,7 @@ namespace FamiconWars.Game
             SetText(p.Who, kind == SeatKind.Empty ? "空席" : v.SeatNames[s]);
             p.Who.color = kind == SeatKind.Empty ? Muted : Paper;
             SetText(p.State, kind == SeatKind.Bot ? "戦法: " + StyleLabels[Math.Max(0, Math.Min(3, v.SeatStyles[s]))]
-                : kind == SeatKind.Human ? (v.MySeat == s ? "あなたの席です" : v.SeatOnline[s] ? "準備できています" : "接続が切れています")
+                : kind == SeatKind.Human ? (v.SeatProxy[s] ? "COMが代わりに打っています" : v.MySeat == s ? "あなたの席です" : v.SeatOnline[s] ? "準備できています" : "接続が切れています")
                 : "誰でも座れます");
             bool sit = v.Editable && kind == SeatKind.Empty && v.MySeat != s;
             bool bot = v.Editable && v.IAmHost && kind != SeatKind.Human;
@@ -590,11 +652,16 @@ namespace FamiconWars.Game
             SetActive(p.Bot, bot);
             if (bot)
             {
-                float bx = sit ? 240 : 24;
-                var brt = (RectTransform)p.Bot.transform;
-                if (brt.anchoredPosition.x != bx) brt.anchoredPosition = new Vector2(bx, 24);
                 int level = kind == SeatKind.Bot ? v.SeatLevels[s] : 0;
-                SetText(p.Bot.GetComponentInChildren<TextMeshProUGUI>(), "BOT: " + BotLabels[level] + "  ▼");
+                if (p.Row)
+                    SetText(p.Bot.GetComponentInChildren<TextMeshProUGUI>(), (level > 0 ? BotLabels[level] : "BOT") + " ▼");
+                else
+                {
+                    float bx = sit ? 240 : 24;
+                    var brt = (RectTransform)p.Bot.transform;
+                    if (brt.anchoredPosition.x != bx) brt.anchoredPosition = new Vector2(bx, 24);
+                    SetText(p.Bot.GetComponentInChildren<TextMeshProUGUI>(), "BOT: " + BotLabels[level] + "  ▼");
+                }
             }
         }
 
@@ -627,9 +694,12 @@ namespace FamiconWars.Game
                 StyleButton(botStyleButtons[i], level > 0 && i == style);
                 if (botStyleButtons[i].interactable != level > 0) botStyleButtons[i].interactable = level > 0;
             }
-            var bot = (RectTransform)seatParts[s].Bot.transform;
-            // top-left of the BOT button in page coordinates (card 480 x 300 pinned top-left at CardPos)
-            botStrip.anchoredPosition = seatParts[s].CardPos + new Vector2(bot.anchoredPosition.x, -300 + 24 + 56) + new Vector2(-8, -8);
+            var part = SeatPart(v, s);
+            var bot = (RectTransform)part.Bot.transform;
+            // top-left of the BOT button in page coordinates (card 480 x 300 / row 980 x 64, pinned top-left at CardPos)
+            botStrip.anchoredPosition = part.Row
+                ? part.CardPos + new Vector2(bot.anchoredPosition.x, bot.anchoredPosition.y) + new Vector2(-8, -8)
+                : part.CardPos + new Vector2(bot.anchoredPosition.x, -300 + 24 + 56) + new Vector2(-8, -8);
             SetActive(botBlocker, true);
             SetActive(botStrip, true);
             if (!wasOpen) SelectInstant(botLevelButtons[level]);

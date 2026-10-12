@@ -15,10 +15,9 @@ namespace FamiconWars.Game
             { "terrain.port", "港" }, { "terrain.road", "道路" }, { "terrain.bridge", "橋" }, { "terrain.plain", "平地" },
             { "terrain.forest", "森" }, { "terrain.mountain", "山" }, { "terrain.lake", "湖" }, { "terrain.river", "川" },
             { "terrain.beach", "砂浜" }, { "terrain.sea", "海" },
-            { "army.Red", "レッド軍" }, { "army.Blue", "ブルー軍" }, { "army.None", "中立" },
         };
 
         public static string Get(string key) => ja.TryGetValue(key, out var v) ? v : key;
-        public static string Army(FamiconWars.Core.Army a) => Get("army." + a);
+        public static string Army(FamiconWars.Core.Army a) => FamiconWars.Core.Armies.Name(a);
     }
 }

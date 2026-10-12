@@ -12,6 +12,10 @@ namespace FamiconWars.Game
     public sealed class MatchRecord
     {
         public string mapId, date, red, blue, result;
+        /// <summary>Who played each army (three or more armies; red/blue alone for older records).</summary>
+        public string[] names;
+        /// <summary>Armies that took part, e.g. "1101" (empty: every army of the map).</summary>
+        public string seated;
         public bool online;
         public string[] cmds;
         public int[] seeds;          // uint stored bit for bit (JsonUtility-friendly)

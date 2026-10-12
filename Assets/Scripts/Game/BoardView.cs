@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using FamiconWars.Core;
 using UnityEngine;
 
@@ -124,7 +124,7 @@ namespace FamiconWars.Game
                 if (ownerMarks[i] == null) continue;
                 var o = state.Owner[i];
                 if (pictured[i]) ownerMarks[i].sprite = TileIcons.Get(state.Data.Terrains[state.Terrain[i]].Id, o);
-                else ownerMarks[i].color = o == Army.Red ? RedArmy : o == Army.Blue ? BlueArmy : Neutral;
+                else ownerMarks[i].color = o == Army.None ? Neutral : ArmyStyle.Board(o);
                 captureTexts[i].text = state.CapturingUnit[i] >= 0 ? state.CaptureProgress[i] + "/" + state.Rules.CaptureGoal : "";
                 if (captureBacks[i] != null) captureBacks[i].enabled = captureTexts[i].text.Length > 0;
                 if (produceMarks[i] != null)
@@ -212,12 +212,12 @@ namespace FamiconWars.Game
             v.BaseY = IconRest(d).y;
             var sp = UnitIcons.Get(d.Id, u.Army);
             v.Icon = MakeSprite("Icon", v.Root.transform, IconRest(d), 1f, Color.white, 4, sp ?? square);
-            v.Icon.flipX = u.Army == Army.Blue;     // armies face each other
+            v.Icon.flipX = ArmyStyle.FacesLeft(u.Army);     // armies face each other
             if (sp == null)
             {
                 // no icon for this type: army-coloured plate with the short name
                 v.Icon.transform.localScale = new Vector3(0.7f, 0.7f, 1);
-                v.Icon.color = u.Army == Army.Red ? RedArmy : BlueArmy;
+                v.Icon.color = ArmyStyle.Board(u.Army);
                 v.Fallback = MakeText("Label", v.Root.transform, new Vector3(0, 0.04f, 0), d.ShortName, 0.065f, Color.white, 5);
             }
 

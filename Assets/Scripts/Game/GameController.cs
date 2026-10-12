@@ -25,7 +25,7 @@ namespace FamiconWars.Game
         GameSettings settings;
         readonly Dictionary<string, Texture2D> previews = new Dictionary<string, Texture2D>();
 
-        readonly AiPlayer[] ai = new AiPlayer[2];
+        readonly AiPlayer[] ai = new AiPlayer[Armies.Max];
         bool aiRunning, paused;
 
         Mode mode = Mode.Screens;
@@ -137,6 +137,7 @@ namespace FamiconWars.Game
             hud.OnRoomStand += () => FwClient.RoomAction("stand");
             hud.OnRoomBot += (seat, level) => FwClient.RoomAction("bot", seat, level.ToString());
             hud.OnRoomBotStyle += (seat, style) => FwClient.RoomAction("botstyle", seat, style.ToString());
+            hud.OnRoomTurnTime += sec => FwClient.RoomAction("turntime", sec);
             hud.OnRoomHost += id => FwClient.RoomAction("host", id);
             hud.OnRoomRename += name =>
             {
@@ -214,7 +215,7 @@ namespace FamiconWars.Game
         {
             LeaveMatch();
             var m = MapCatalog.Find(settings.MapId);
-            hud.ShowSetupScreen(settings, m != null ? m.Name : settings.MapId);
+            hud.ShowSetupScreen(settings, m != null ? m.Name : settings.MapId, m != null ? m.Players : 2);
         }
 
         /// <summary>Mini map drawn from the terrain colours (3px per tile, owned properties in army colour).</summary>
@@ -234,7 +235,7 @@ namespace FamiconWars.Game
                 var t = data.Terrains[s.Terrain[i]];
                 ColorUtility.TryParseHtmlString(t.Color, out var c);
                 var o = s.Owner[i];
-                var inner = t.IsProperty && o != Army.None ? (o == Army.Red ? BoardView.RedArmy : BoardView.BlueArmy) : c;
+                var inner = t.IsProperty && o != Army.None ? ArmyStyle.Board(o) : c;
                 for (int dy = 0; dy < k; dy++)
                 for (int dx = 0; dx < k; dx++)
                 {
@@ -246,7 +247,7 @@ namespace FamiconWars.Game
             foreach (var u in s.Units.Where(u => !u.IsCarried))
             {
                 int py = (s.Height - 1 - u.Y) * k + 1;
-                px[py * tex.width + u.X * k + 1] = u.Army == Army.Red ? BoardView.RedArmy : BoardView.BlueArmy;
+                px[py * tex.width + u.X * k + 1] = ArmyStyle.Board(u.Army);
             }
             tex.SetPixels(px); tex.Apply();
             previews[id] = tex;
@@ -261,22 +262,28 @@ namespace FamiconWars.Game
             uint seed = (uint)System.Environment.TickCount;
             // 戦法: as chosen, or random (and then not shown). COM vs COM: a random 戦法 never comes out the same
             // as the other side's, so that one of them has the upper hand.
-            var seeds = new[] { seed, seed + 977u };
-            if (settings.Players[0] > 0 && settings.Players[1] > 0)
+            var entry = MapCatalog.Find(settings.MapId);
+            int players = entry != null ? entry.Players : 2;
+            var seated = settings.Seated(players);
+            var seeds = new uint[Armies.Max];
+            for (int a = 0; a < seeds.Length; a++) seeds[a] = seed + 977u * (uint)a;
+            if (players == 2 && settings.Players[0] > 0 && settings.Players[1] > 0)
             {
                 if (settings.Styles[1] == 0) seeds[1] = AiPlayer.SeedForStyleOtherThan(seeds[1], AiPlayer.BotStyle(settings.Styles[0], seeds[0]));
                 else if (settings.Styles[0] == 0) seeds[0] = AiPlayer.SeedForStyleOtherThan(seeds[0], (AiStyle)settings.Styles[1]);
             }
-            for (int a = 0; a < 2; a++)
+            for (int a = 0; a < Armies.Max; a++)
             {
                 styleHidden[a] = settings.Styles[a] == 0;
-                if (settings.Players[a] <= 0) { ai[a] = null; continue; }
+                if (a >= players || !seated[a] || settings.Players[a] <= 0) { ai[a] = null; continue; }
                 var prof = AiProfile.ForLevel(settings.Players[a]);
                 if (settings.Styles[a] > 0) prof.Style = (AiStyle)settings.Styles[a];
                 ai[a] = new AiPlayer((Army)a, prof, seeds[a]);
             }
-            LoadMap(settings.MapId);
+            LoadMap(settings.MapId, seated);
+            recSeated = seated;
             recMapId = settings.MapId; recCmds.Clear(); recSeeds.Clear(); recSaved = false;
+            turnLeft = -1;
             recSeedRng = new Rng((uint)System.Environment.TickCount | 1u);
             hud.ShowMatchChrome(true);
             mode = Mode.Idle;
@@ -285,11 +292,22 @@ namespace FamiconWars.Game
             RefreshHud();
         }
 
-        void LoadMap(string id)
+        void LoadMap(string id, bool[] seated = null)
         {
             var map = MapDef.Parse(Text("Maps/" + id), data);
-            state = GameState.Create(data, map, (uint)System.Environment.TickCount);
+            state = GameState.Create(data, map, (uint)System.Environment.TickCount, seated);
             BuildBoard();
+        }
+
+        bool[] recSeated;
+
+        /// <summary>The one army played by a person at this screen, or None (several people, or none).</summary>
+        Army LocalHuman()
+        {
+            if (online) return myArmy >= 0 ? (Army)myArmy : Army.None;
+            Army found = Army.None; int n = 0;
+            for (int a = 0; a < state.Players; a++) if (!state.Out[a] && ai[a] == null) { found = (Army)a; n++; }
+            return n == 1 ? found : Army.None;
         }
 
         void BuildBoard()
@@ -340,10 +358,17 @@ namespace FamiconWars.Game
             if (camSize < camFit - 0.01f)
             {
                 // zoomed in: start at our own HQ
-                Army mine = online ? (myArmy >= 0 ? (Army)myArmy : Army.Red) : (ai[0] == null || ai[1] != null ? Army.Red : Army.Blue);
+                Army mine = LocalHuman();
+                if (mine == Army.None) mine = state.Active;
                 for (int i = 0; i < state.Owner.Length; i++)
                     if (state.Owner[i] == mine && state.TerrainAt(i % state.Width, i / state.Width).Id == "HQ")
                         center = new Vector3(i % state.Width, -(i / state.Width), -10);
+                // a base in a corner: keep the view on the board instead of half off it
+                float halfW = camSize * aspect, halfH = camSize;
+                if (state.Width > 2 * halfW) center.x = Mathf.Clamp(center.x, halfW - 0.5f, state.Width - 0.5f - halfW);
+                else center.x = (state.Width - 1) / 2f;   // the whole width fits: centred
+                float bar = halfH * 0.14f;   // the top bar covers about 7% of the screen
+                if (state.Height > 2 * halfH - bar) center.y = Mathf.Clamp(center.y, -(state.Height - 0.5f) + halfH, 0.5f - halfH + bar);
             }
             camGoal = center;
             cam.transform.position = camGoal;
@@ -473,12 +498,18 @@ namespace FamiconWars.Game
         bool ComTurn => InMatch && !replaying && !online && !state.GameOver && ai[(int)state.Active] != null;
         bool HumanTurn => InMatch && !replaying && !state.GameOver && (online ? myArmy >= 0 && (int)state.Active == myArmy && !awaiting && incoming.Count == 0 : ai[(int)state.Active] == null);
 
-        string ControllerName(Army a) => replaying ? (a == Army.Red ? replayRec.red : replayRec.blue) : online ? ((int)a == myArmy ? "あなた" : (room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : "相手") + StyleTag(botCopies[(int)a]))
+        string ControllerName(Army a) => replaying ? ReplayName(a) : online ? ((int)a == myArmy ? "あなた" : (room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : "相手") + StyleTag(botCopies[(int)a]))
             : ai[(int)a] == null ? "人間" : ComName(ai[(int)a]);
+
+        string ReplayName(Army a)
+        {
+            if (replayRec.names != null && (int)a < replayRec.names.Length) return replayRec.names[(int)a];
+            return a == Army.Red ? replayRec.red : a == Army.Blue ? replayRec.blue : Labels.Army(a);
+        }
 
         /// <summary>"COM 強い・速攻": the level and the 戦法 it drew for this match.</summary>
         string ComName(AiPlayer p) => "COM " + p.Profile.Name + StyleTag(p);
-        readonly bool[] styleHidden = new bool[2];           // the 戦法 was left to chance: keep it secret
+        readonly bool[] styleHidden = new bool[Armies.Max];           // the 戦法 was left to chance: keep it secret
         string StyleTag(AiPlayer p) => p == null || p.Style <= AiStyle.Standard || styleHidden[(int)p.Army] ? "" : "・" + AiProfile.StyleNames[(int)p.Style];
 
         int Income(Army a)
@@ -495,6 +526,7 @@ namespace FamiconWars.Game
             hud.SetSpectatorBack(online && InMatch && !replaying && myArmy < 0 && !IAmHost && state != null && !state.GameOver);
             if (!InMatch) return;
             hud.SetTopBar(state, Income(state.Active), ControllerName(state.Active), HumanTurn, GameSettings.SpeedNames[Speed]);
+            hud.SetPlayers(state, a => ControllerName(a), a => Income(a));
         }
 
         // ---------------- sound ----------------
@@ -513,7 +545,7 @@ namespace FamiconWars.Game
                     if (gameOverAt < 0) gameOverAt = Time.unscaledTime;
                     want = Time.unscaledTime - gameOverAt < 3f ? null : "result";   // the fanfare plays first
                 }
-                else { gameOverAt = -1; want = state.Active == Army.Red ? "red" : "blue"; }
+                else { gameOverAt = -1; want = ((int)state.Active & 1) == 0 ? "red" : "blue"; }
             }
             else { gameOverAt = -1; want = hud.TitleMusicScreen ? "title" : "menu"; }
             GameAudio.Music(want);
@@ -547,7 +579,8 @@ namespace FamiconWars.Game
                     case JoinedEvent _: GameAudio.Se("join"); break;
                     case ResuppliedEvent _: GameAudio.Se("resupply"); break;
                     case PhaseStartEvent _: GameAudio.Se("phase_start", 0.8f, 0); break;
-                    case UnitLostEvent l when l.Reason != "撃破": GameAudio.Se("explode", 0.6f); break;
+                    case EliminatedEvent _: GameAudio.Se("capture_done", 1f, 0); break;
+                    case UnitLostEvent l when l.Reason != "撃破" && l.Reason != "敗退": GameAudio.Se("explode", 0.6f); break;
                 }
             }
         }
@@ -571,10 +604,7 @@ namespace FamiconWars.Game
         void PlayResultSound(Army winner)
         {
             if (winner == Army.None) return;          // a draw (time limit, ended by hand): no fanfare
-            int me = -1;
-            if (online) me = myArmy;
-            else if (ai[0] == null && ai[1] != null) me = 0;
-            else if (ai[1] == null && ai[0] != null) me = 1;
+            int me = (int)LocalHuman();
             bool won = winner != Army.None && (me < 0 || (int)winner == me);
             GameAudio.Se(won ? "victory" : "defeat", 1f, 0);
         }
@@ -638,6 +668,7 @@ namespace FamiconWars.Game
                 hud.Hint(paused ? "一時停止中(Spaceで再開)" : null);
             }
             if (ComTurn && !aiRunning) StartCoroutine(RunCom());
+            UpdateTurnTimer();
 
             if (mouse == null) return;
             Vector2 mp = mouse.position.ReadValue();
@@ -1042,7 +1073,10 @@ namespace FamiconWars.Game
                     case ResuppliedEvent s:
                         lines.Add($"全補しました({s.UnitIds.Count}部隊、{s.Cost:N0})");
                         break;
-                    case UnitLostEvent l when l.Reason != "撃破":
+                    case EliminatedEvent el:
+                        lines.Add(Labels.Army(el.Army) + "が脱落しました" + (el.By != Army.None ? "(" + Labels.Army(el.By) + "が基地を占領。施設はすべて" + Labels.Army(el.By) + "のものに)" : "(" + el.Reason + ")"));
+                        break;
+                    case UnitLostEvent l when l.Reason != "撃破" && l.Reason != "敗退":
                         lines.Add("部隊が" + l.Reason + "しました");
                         break;
                     case GameOverEvent g when replaying:
@@ -1067,7 +1101,7 @@ namespace FamiconWars.Game
             yield return null;   // the cut-in for the final blow starts in the same frame
             while (hud.BattlePlaying) yield return null;
             PlayResultSound(g.Winner);
-            hud.ShowGameOver(g.Winner, g.Reason);
+            hud.ShowGameOver(g.Winner, g.Reason, Ranking());
         }
 
         // ---------------- online ----------------
@@ -1104,7 +1138,8 @@ namespace FamiconWars.Game
             for (int i = 0; m.codes != null && i < m.codes.Length; i++)
             {
                 var e = MapCatalog.Find(m.mapIds[i]);
-                list.Add(new RoomListEntry { Code = m.codes[i], MapName = e != null ? e.Name : m.mapIds[i], Host = m.hostNames[i], State = m.states[i], Members = m.members[i], SeatsTaken = m.seatsTaken[i] });
+                list.Add(new RoomListEntry { Code = m.codes[i], MapName = e != null ? e.Name : m.mapIds[i], Host = m.hostNames[i], State = m.states[i], Members = m.members[i], SeatsTaken = m.seatsTaken[i],
+                    SeatCount = m.seatCounts != null && m.seatCounts.Length > i ? m.seatCounts[i] : 2 });
             }
             hud.SetRoomList(list);
         }
@@ -1203,23 +1238,38 @@ namespace FamiconWars.Game
             }
             if (online && InMatch)
             {
-                if (!state.GameOver && myArmy >= 0)
-                    hud.Hint(m.seatOnline != null && !m.seatOnline[1 - myArmy] ? "相手の接続が切れました。戻ってくるのを待っています" : null);
+                if (!state.GameOver && myArmy >= 0) hud.Hint(AwayText(m));
                 RefreshHud();
             }
             else if (hud.RoomVisible) hud.ShowRoom(ToView(m), Preview);
         }
 
+        /// <summary>Players of the match who have lost their connection (and whether a COM stands in for them).</summary>
+        string AwayText(RoomStatusMsg m)
+        {
+            if (m.seatKinds == null || m.seatOnline == null || state == null) return null;
+            var parts = new List<string>();
+            for (int s = 0; s < Mathf.Min(state.Players, m.seatKinds.Length); s++)
+            {
+                if (s == myArmy || state.Out[s] || (SeatKind)m.seatKinds[s] != SeatKind.Human || m.seatOnline[s]) continue;
+                bool proxy = m.seatProxy != null && m.seatProxy.Length > s && m.seatProxy[s];
+                parts.Add(Labels.Army((Army)s) + (proxy ? "(COMが代わりに打っています)" : "(戻るのを待っています。しばらくするとCOMが代わりに打ちます)"));
+            }
+            return parts.Count == 0 ? null : "接続が切れました: " + string.Join("、", parts);
+        }
+
         RoomView ToView(RoomStatusMsg m)
         {
-            var v = new RoomView { Code = m.code, MapId = m.mapId, Started = m.started, GameOver = m.gameOver, IAmHost = m.myId == m.hostId, MySeat = m.mySeat, IsPublic = m.isPublic };
-            for (int s = 0; s < 2; s++)
+            var v = new RoomView { Code = m.code, MapId = m.mapId, Started = m.started, GameOver = m.gameOver, IAmHost = m.myId == m.hostId, MySeat = m.mySeat, IsPublic = m.isPublic,
+                SeatCount = Mathf.Clamp(m.seatCount, 2, Armies.Max), TurnSeconds = m.turnSeconds };
+            for (int s = 0; s < Armies.Max; s++)
             {
-                v.SeatKinds[s] = m.seatKinds != null ? (SeatKind)m.seatKinds[s] : SeatKind.Empty;
-                v.SeatNames[s] = m.seatNames != null ? m.seatNames[s] : "";
-                v.SeatLevels[s] = m.seatLevels != null ? m.seatLevels[s] : 0;
+                v.SeatKinds[s] = m.seatKinds != null && m.seatKinds.Length > s ? (SeatKind)m.seatKinds[s] : SeatKind.Empty;
+                v.SeatNames[s] = m.seatNames != null && m.seatNames.Length > s ? m.seatNames[s] : "";
+                v.SeatLevels[s] = m.seatLevels != null && m.seatLevels.Length > s ? m.seatLevels[s] : 0;
                 v.SeatStyles[s] = m.seatStyles != null && m.seatStyles.Length > s ? m.seatStyles[s] : 0;
-                v.SeatOnline[s] = m.seatOnline != null && m.seatOnline[s];
+                v.SeatOnline[s] = m.seatOnline != null && m.seatOnline.Length > s && m.seatOnline[s];
+                v.SeatProxy[s] = m.seatProxy != null && m.seatProxy.Length > s && m.seatProxy[s];
             }
             for (int i = 0; m.memberIds != null && i < m.memberIds.Length; i++)
                 v.Members.Add((m.memberIds[i], m.memberNames[i], m.memberSeats[i], m.memberOnline[i], m.memberIds[i] == m.hostId, m.memberIds[i] == m.myId));
@@ -1273,12 +1323,16 @@ namespace FamiconWars.Game
             online = true; awaiting = false;
             incoming.Clear();
             myArmy = m.myArmy;
-            ai[0] = ai[1] = null;
+            for (int a = 0; a < ai.Length; a++) ai[a] = null;
             onlineBot = onlineBotLevel > 0 && myArmy >= 0 ? new AiPlayer((Army)myArmy, AiProfile.ForLevel(onlineBotLevel), (uint)System.Environment.TickCount) : null;
             var map = MapDef.Parse(Text("Maps/" + m.mapId), data);
             replica = new OnlineReplica();
-            replica.Rebuild(data, map, m.cmds ?? new string[0], m.seeds ?? new uint[0]);
+            replica.Rebuild(data, map, m.cmds ?? new string[0], m.seeds ?? new uint[0], m.seated);
             state = replica.State;
+            onlineSeated = m.seated;
+            onlineTurnSeconds = m.turnSeconds;
+            turnArmy = state.Active; turnDay = state.Day;
+            turnLeft = m.turnSeconds > 0 ? Mathf.Max(0, m.turnSeconds - m.phaseElapsed) : -1;
             SetupBotCopies(m, map);
             recMapId = m.mapId; recSaved = false;
             BuildBoard();
@@ -1289,7 +1343,7 @@ namespace FamiconWars.Game
             hud.Toast(myArmy < 0 ? "観戦しています" : "あなたは" + Labels.Army((Army)myArmy) + "です" + (replica.Applied > 0 ? "(続きから再開)" : ""));
             if (myArmy < 0) hud.Hint("観戦中");
             RefreshHud();
-            if (state.GameOver) hud.ShowGameOver(state.Winner, "対戦は終了しています");
+            if (state.GameOver) hud.ShowGameOver(state.Winner, "対戦は終了しています", Ranking());
         }
 
         /// <summary>One accepted command from the server (ours, the opponent's or a BOT's): queued for display.</summary>
@@ -1301,7 +1355,7 @@ namespace FamiconWars.Game
 
         // ---------------- online BOT seats (played on the host's PC, checked by everyone) ----------------
 
-        readonly AiPlayer[] botCopies = new AiPlayer[2];  // this client's copy of each BOT seat of the match
+        readonly AiPlayer[] botCopies = new AiPlayer[Armies.Max];  // this client's copy of each BOT seat of the match
         string botSent;                                    // BOT move this client (as host) sent, not applied yet
         float botSendAt;
         bool botCheckFailed;                               // a mismatch was reported: stop checking
@@ -1326,7 +1380,7 @@ namespace FamiconWars.Game
         {
             botSent = null; botCheckFailed = false;
             bool any = false;
-            for (int s = 0; s < 2; s++)
+            for (int s = 0; s < Armies.Max; s++)
             {
                 int level = m.botLevels != null && m.botLevels.Length > s ? m.botLevels[s] : 0;
                 int style = m.botStyles != null && m.botStyles.Length > s ? m.botStyles[s] : 0;
@@ -1340,7 +1394,7 @@ namespace FamiconWars.Game
             for (int i = cmds.Length - 1; i >= 0; i--) if (cmds[i].StartsWith("E,")) { start = i + 1; break; }
             var seeds = m.seeds ?? new uint[0];
             var temp = new OnlineReplica();
-            temp.Rebuild(data, map, cmds.Take(start).ToArray(), seeds.Take(start).ToArray());
+            temp.Rebuild(data, map, cmds.Take(start).ToArray(), seeds.Take(start).ToArray(), m.seated);
             for (int i = start; i < cmds.Length; i++)
             {
                 var c = CommandCodec.Decode(cmds[i]);
@@ -1405,6 +1459,65 @@ namespace FamiconWars.Game
             return r;
         }
 
+        static string RecordPlayers(MatchRecord r) =>
+            r.names != null && r.names.Length > 2 ? string.Join(" / ", r.names) : r.red + " 対 " + r.blue;
+
+        /// <summary>Three or more armies: the final order (winner first, then the last one knocked out ...).</summary>
+        string Ranking()
+        {
+            if (state == null || state.Players <= 2) return null;
+            var order = new List<Army>();
+            if (state.Winner != Army.None) order.Add(state.Winner);
+            else
+            {
+                // a draw (time limit, ended by hand): the armies still in, by the properties they hold
+                var alive = new List<Army>();
+                for (int a = 0; a < state.Players; a++) if (!state.Out[a]) alive.Add((Army)a);
+                alive.Sort((x, y) => state.Owner.Count(o => o == y).CompareTo(state.Owner.Count(o => o == x)));
+                order.AddRange(alive);
+            }
+            for (int i = state.Eliminated.Count - 1; i >= 0; i--) order.Add(state.Eliminated[i]);
+            var lines = new List<string>();
+            for (int i = 0; i < order.Count; i++)
+                lines.Add((state.Winner == Army.None && !state.Out[(int)order[i]] ? "　-　" : (i + 1) + "位　")
+                          + "<color=" + ArmyStyle.TextHex(order[i]) + ">" + Labels.Army(order[i]) + "</color>　<color=#A3AC92>" + ControllerName(order[i]) + "</color>");
+            return string.Join("\n", lines);
+        }
+
+        // ---- time limit for a human phase (offline; online the server keeps the time) ----
+        float turnLeft = -1;
+        Army turnArmy = Army.None;
+        int turnDay;
+
+        string onlineSeated;
+        int onlineTurnSeconds;
+
+        /// <summary>Online: a person (not a BOT, not a stand-in COM) plays the army whose phase it is.</summary>
+        bool OnlinePersonPhase => room.HasValue && room.Value.seatKinds != null && (int)state.Active < room.Value.seatKinds.Length
+            && (SeatKind)room.Value.seatKinds[(int)state.Active] == SeatKind.Human
+            && !(room.Value.seatProxy != null && room.Value.seatProxy.Length > (int)state.Active && room.Value.seatProxy[(int)state.Active]);
+
+        void UpdateTurnTimer()
+        {
+            int limit = online ? onlineTurnSeconds : settings.TurnSeconds;
+            bool show = online ? !replaying && OnlinePersonPhase && incoming.Count == 0 : HumanTurn;
+            if (limit <= 0 || state.GameOver || !show || mode == Mode.GameOver) { hud.SetTurnTimer(null, false); return; }
+            if (turnArmy != state.Active || turnDay != state.Day || turnLeft < 0) { turnArmy = state.Active; turnDay = state.Day; turnLeft = limit; }
+            // offline the clock stops while the rules, the matchup chart or the settings are open; online
+            // the server keeps the time (this is only the display), so it never stops
+            if (online || (!hud.BannerShowing && !hud.HowToOverMatch && !hud.MatchupVisible && !hud.SoundPanelVisible)) turnLeft -= Time.unscaledDeltaTime;
+            int secs = Mathf.Max(0, Mathf.CeilToInt(turnLeft));
+            hud.SetTurnTimer(secs / 60 + ":" + (secs % 60).ToString("00"), secs <= 10);
+            if (online) { if (turnLeft < 0) turnLeft = 0; return; }   // the server ends the phase
+            if (turnLeft <= 0)
+            {
+                turnLeft = -1;
+                Cancel();
+                hud.Toast("時間切れ:手番を終えました");
+                Try(new EndPhaseCommand { Army = state.Active });
+            }
+        }
+
         string RecordName(Army a)
         {
             if (online) return room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : Labels.Army(a);
@@ -1438,6 +1551,8 @@ namespace FamiconWars.Game
             {
                 mapId = recMapId, date = System.DateTime.Now.ToString("yyyy/MM/dd HH:mm"),
                 red = RecordName(Army.Red), blue = RecordName(Army.Blue), online = online,
+                names = Enumerable.Range(0, state.Players).Select(a => RecordName((Army)a)).ToArray(),
+                seated = online ? onlineSeated ?? "" : recSeated != null ? string.Concat(recSeated.Select(b => b ? "1" : "0")) : "",
                 result = (winner == Army.None ? "引き分け" : Labels.Army(winner) + "の勝ち") + "(" + reason + ")",
                 cmds = cmds.ToArray(), seeds = seeds.Select(x => unchecked((int)x)).ToArray()
             };
@@ -1453,7 +1568,7 @@ namespace FamiconWars.Game
             foreach (var r in MatchRecords.Load())
             {
                 var e = MapCatalog.Find(r.mapId);
-                items.Add((r.date + "　" + (e != null ? e.Name : r.mapId) + "　" + r.red + " 対 " + r.blue,
+                items.Add((r.date + "　" + (e != null ? e.Name : r.mapId) + "　" + RecordPlayers(r),
                            r.result + "　" + r.cmds.Length + "手" + (r.online ? "　オンライン" : "")));
             }
             hud.ShowRecords(items);
@@ -1476,7 +1591,8 @@ namespace FamiconWars.Game
         {
             n = Mathf.Clamp(n, 0, replayRec.cmds.Length);
             var map = MapDef.Parse(Text("Maps/" + replayRec.mapId), data);
-            state = GameState.Create(data, map, 1);
+            bool[] seatedRec = string.IsNullOrEmpty(replayRec.seated) ? null : replayRec.seated.Select(ch => ch == '1').ToArray();
+            state = GameState.Create(data, map, 1, seatedRec);
             RulesEngine.StartGame(state);
             for (int i = 0; i < n; i++)
             {
@@ -1489,7 +1605,7 @@ namespace FamiconWars.Game
             hud.SkipBattle();
             BuildBoard();
             RefreshHud();
-            ReplayInfo(n > 0 ? "" : replayRec.red + " 対 " + replayRec.blue + "　" + replayRec.result);
+            ReplayInfo(n > 0 ? "" : RecordPlayers(replayRec) + "　" + replayRec.result);
         }
 
         /// <summary>Plays the next command (with its battle scene when animate).</summary>

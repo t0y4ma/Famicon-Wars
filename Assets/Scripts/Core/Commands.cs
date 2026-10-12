@@ -49,6 +49,12 @@ namespace FamiconWars.Core
     public sealed class PhaseStartEvent : GameEvent { public Army Army; public int Day, Income; }
     public sealed class ResuppliedEvent : GameEvent { public int Cost; public List<int> UnitIds = new List<int>(); }
     public sealed class GameOverEvent : GameEvent { public Army Winner; public string Reason; }
+    /// <summary>
+    /// An army is out while the game goes on (three or more armies). By = the army that took its base
+    /// (it gets all of the loser's properties, and the base itself becomes a city at X,Y), else None
+    /// (routed or surrendered: its properties turn neutral). Its remaining units are removed.
+    /// </summary>
+    public sealed class EliminatedEvent : GameEvent { public Army Army, By; public string Reason; public int X = -1, Y = -1; }
 
     public sealed class ApplyResult
     {

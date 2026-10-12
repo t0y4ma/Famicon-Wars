@@ -22,12 +22,13 @@ namespace FamiconWars.Game
 
         GameSettings editing;
         bool setupRowsBuilt;
-        List<Button> segRed, segBlue, segSpeed, segAnim, segBgm;
-        List<Button> segRedStyle, segBlueStyle;
-        TextMeshProUGUI styleLabelRed, styleLabelBlue;
-        Slider setupBgmVol, setupSeVol;
-        TextMeshProUGUI setupBgmVal, setupSeVal;
-        static readonly int[] VolumeSteps = { 0, 25, 50, 75, 100 };
+        List<Button> segSpeed, segAnim;
+        /// <summary>Per army: its row (tab, choices, 戦法 button); rows past the map's armies are hidden.</summary>
+        readonly List<(RectTransform tab, List<Button> kind, Button style)> armyRows = new List<(RectTransform, List<Button>, Button)>();
+        int setupPlayers = 2;
+        Slider setupTurn;
+        TextMeshProUGUI setupTurnVal, setupNote;
+        static readonly string[] StyleNames = { "ランダム", "速攻", "物量", "精鋭" };
         static readonly Color Backdrop = new Color(0.055f, 0.065f, 0.05f, 0.9f);
 
         void BuildMenus()
@@ -133,9 +134,9 @@ namespace FamiconWars.Game
 
             var grid = new GameObject("Grid", typeof(RectTransform));
             mapGrid = (RectTransform)grid.transform; mapGrid.SetParent(mapRoot, false);
-            Pin(mapGrid, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0, 10), new Vector2(1440, 540));
+            Pin(mapGrid, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0, 4), new Vector2(1440, 680));
             var gl = grid.AddComponent<GridLayoutGroup>();
-            gl.cellSize = new Vector2(464, 258); gl.spacing = new Vector2(24, 24);
+            gl.cellSize = new Vector2(464, 208); gl.spacing = new Vector2(24, 20);
             gl.childAlignment = TextAnchor.UpperCenter; gl.constraint = GridLayoutGroup.Constraint.FixedColumnCount; gl.constraintCount = 3;
 
             var back = MakeButton("Back", mapRoot, "戻る", false, () => OnMapBack?.Invoke());
@@ -183,7 +184,7 @@ namespace FamiconWars.Game
             // preview area (left)
             var frame = Panel("PreviewFrame", rt, Plate);
             frame.GetComponent<Image>().raycastTarget = false;
-            Pin(frame, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(20, 0), new Vector2(200, 200), pivot: new Vector2(0, 0.5f));
+            Pin(frame, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(18, 0), new Vector2(172, 172), pivot: new Vector2(0, 0.5f));
             var tex = m.Ready ? preview?.Invoke(m.Id) : null;
             if (tex != null)
             {
@@ -191,7 +192,7 @@ namespace FamiconWars.Game
                 ri.transform.SetParent(frame, false);
                 ri.texture = tex; ri.raycastTarget = false;
                 float aspect = (float)tex.width / tex.height;
-                var size = aspect >= 1 ? new Vector2(184, 184 / aspect) : new Vector2(184 * aspect, 184);
+                var size = aspect >= 1 ? new Vector2(158, 158 / aspect) : new Vector2(158 * aspect, 158);
                 Pin(ri.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, size);
             }
             else
@@ -203,14 +204,14 @@ namespace FamiconWars.Game
 
             var name = Label("Name", rt, SizeTitle - 6, m.Ready ? Paper : Muted, TextAlignmentOptions.TopLeft, true);
             name.text = m.Name;
-            Pin(name.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(124, -26), new Vector2(-268, 44), pivot: new Vector2(0.5f, 1), stretchX: true);
+            Pin(name.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(106, -18), new Vector2(-232, 44), pivot: new Vector2(0.5f, 1), stretchX: true);
             var size2 = Label("Size", rt, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
-            size2.text = m.Ready ? m.Width + " × " + m.Height : "";
-            Pin(size2.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(124, -74), new Vector2(-268, 28), pivot: new Vector2(0.5f, 1), stretchX: true);
+            size2.text = m.Ready ? m.Width + " × " + m.Height + "　" + (m.Players > 2 ? "<color=#E4B04A>" + m.Players + "軍</color>" : "2軍") : "";
+            Pin(size2.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(106, -62), new Vector2(-232, 28), pivot: new Vector2(0.5f, 1), stretchX: true);
             var note = Label("Note", rt, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
             note.textWrappingMode = TextWrappingModes.Normal;
             note.text = m.Note;
-            Pin(note.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(124, -108), new Vector2(-268, 120), pivot: new Vector2(0.5f, 1), stretchX: true);
+            Pin(note.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(106, -94), new Vector2(-232, 108), pivot: new Vector2(0.5f, 1), stretchX: true);
             if (!m.Ready) WipBadge(rt, new Vector2(-16, 16), new Vector2(1, 0));   // bottom-right: never covers the name
             return (m, b, marker, name);
         }
@@ -234,7 +235,7 @@ namespace FamiconWars.Game
             setupRoot = Panel("SetupScreen", canvasRt, Backdrop);
             Fill(setupRoot, 0, 0, 0, 0);
             setupCard = Panel("Card", setupRoot, Plate);
-            Pin(setupCard, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1120, 1000));
+            Pin(setupCard, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1280, 880));
             Edge(setupCard, Brass);
             var title = Label("Title", setupCard, SizeTitle, Paper, TextAlignmentOptions.MidlineLeft, true);
             title.text = "対戦設定";
@@ -246,90 +247,91 @@ namespace FamiconWars.Game
             Pin((RectTransform)back.transform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(40, 32), new Vector2(200, 64), pivot: new Vector2(0, 0));
             setupStart = MakeButton("Start", setupCard, "開始", true, () => OnSetupStart?.Invoke());
             Pin((RectTransform)setupStart.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-40, 32), new Vector2(260, 68), pivot: new Vector2(1, 0));
-            var note = Label("Note", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
-            note.textWrappingMode = TextWrappingModes.Normal;
-            note.text = "両軍をCOMにすると観戦。観戦中は Space で一時停止。設定は次回も残ります。";
-            Pin(note.rectTransform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(264, 40), new Vector2(520, 52), pivot: new Vector2(0, 0));
+            setupNote = Label("Note", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
+            setupNote.textWrappingMode = TextWrappingModes.Normal;
+            setupNote.text = "全軍をCOMにすると観戦。観戦中は Space で一時停止。設定は次回も残ります。サウンドはタイトルの「設定」で変えられます。";
+            Pin(setupNote.rectTransform, new Vector2(0, 0), new Vector2(0, 0), new Vector2(264, 36), new Vector2(660, 60), pivot: new Vector2(0, 0));
 
             setupRoot.gameObject.SetActive(false);
         }
 
+        const float ArmyRowTop = -104, ArmyRowStep = 76;
+
         void BuildSetupRows()
         {
             setupRowsBuilt = true;
-            string[] kinds = { "人間", "COM 弱い", "COM 普通", "COM 強い", "COM 最強" };
-            string[] styles = { "ランダム", "速攻", "物量", "精鋭" };
-            ArmyTab(Army.Red, -104);
-            segRed = Segment(-104, 64, kinds, i => { editing.Players[0] = i; UpdateStyleRows(); });
-            styleLabelRed = RowLabel("戦法", -176);
-            styleLabelRed.alignment = TextAlignmentOptions.MidlineRight;
-            segRedStyle = Segment(-176, 48, styles, i => editing.Styles[0] = i);
-            ArmyTab(Army.Blue, -248);
-            segBlue = Segment(-248, 64, kinds, i => { editing.Players[1] = i; UpdateStyleRows(); });
-            styleLabelBlue = RowLabel("戦法 ", -320);
-            styleLabelBlue.alignment = TextAlignmentOptions.MidlineRight;
-            segBlueStyle = Segment(-320, 48, styles, i => editing.Styles[1] = i);
-            Rule(-392);
-
-            RowLabel("ゲーム速度", -412);
-            segSpeed = Segment(-412, 56, GameSettings.SpeedNames, i => editing.Speed = i);
-            RowLabel("戦闘アニメ", -484);
-            segAnim = Segment(-484, 56, new[] { "オン", "オフ" }, i => editing.BattleAnimation = i == 0);
-            Rule(-560);
-
-            var head = RowLabel("サウンド", -580);
-            head.color = Paper; head.fontStyle = FontStyles.Bold;
-            var soundNote = Label("SoundNote", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
-            soundNote.text = "変えるとすぐに反映されます(効果音は試しに鳴ります)";
-            Pin(soundNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -586), new Vector2(700, 32), pivot: new Vector2(0, 1));
-
-            RowLabel("BGM", -628);
-            segBgm = Segment(-628, 56, new[] { "オン", "オフ" }, i => { editing.BgmEnabled = i == 0; GameAudio.Apply(editing); });
-            RowLabel("BGM 音量", -696);
-            setupBgmVol = MakeSlider("BgmVolume", setupCard, new Vector2(240, -696), 780, out setupBgmVal, v => { editing.BgmVolume = v; GameAudio.Apply(editing); }, null);
-            RowLabel("効果音 音量", -764);
-            setupSeVol = MakeSlider("SeVolume", setupCard, new Vector2(240, -764), 780, out setupSeVal, v => { editing.SeVolume = v; GameAudio.Apply(editing); }, () => GameAudio.Se("capture_done", 1f, 0));
+            string[] kinds = { "人間", "COM 弱い", "COM 普通", "COM 強い", "COM 最強", "なし" };
+            for (int a = 0; a < Armies.Max; a++)
+            {
+                int army = a;
+                float y = ArmyRowTop - a * ArmyRowStep;
+                var tab = ArmyTab((Army)a, y);
+                var kind = Segment(y, 64, kinds, i => { editing.Players[army] = i == 5 ? GameSettings.Nobody : i; UpdateArmyRows(); }, 128, 136);
+                Button style = null;
+                style = MakeButton("Style" + a, setupCard, "", false, () =>
+                {
+                    editing.Styles[army] = (editing.Styles[army] + 1) % StyleNames.Length;
+                    SetText(style.GetComponentInChildren<TextMeshProUGUI>(), StyleText(editing.Styles[army]));
+                });
+                Pin((RectTransform)style.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(1064, y), new Vector2(176, 64), pivot: new Vector2(0, 1));
+                armyRows.Add((tab, kind, style));
+            }
+            float y0 = ArmyRowTop - Armies.Max * ArmyRowStep;
+            Rule(y0 - 4);
+            RowLabel("ゲーム速度", y0 - 24);
+            segSpeed = Segment(y0 - 24, 56, GameSettings.SpeedNames, i => editing.Speed = i);
+            RowLabel("戦闘アニメ", y0 - 96);
+            segAnim = Segment(y0 - 96, 56, new[] { "オン", "オフ" }, i => editing.BattleAnimation = i == 0);
+            RowLabel("制限時間", y0 - 168);
+            setupTurn = MakeSlider("TurnTime", setupCard, new Vector2(240, y0 - 168), 860, out setupTurnVal,
+                v => editing.TurnSeconds = TurnTime.FromStep(v), null, 0, TurnTime.Steps, v => TurnTime.Label(TurnTime.FromStep(v)), 150);
+            var turnNote = Label("TurnNote", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
+            turnNote.text = "人間の手番の持ち時間(20秒〜5分、右端は無制限)。時間が来ると手番終了になります";
+            Pin(turnNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(252, y0 - 222), new Vector2(900, 32), pivot: new Vector2(0, 1));
         }
 
-        public void ShowSetupScreen(GameSettings s, string mapName)
+        static string StyleText(int style) => "<size=75%><color=#A3AC92>戦法</color></size> " + StyleNames[style];
+
+        /// <param name="players">Armies on the chosen map (rows past it are hidden; 「なし」 only with three or more).</param>
+        public void ShowSetupScreen(GameSettings s, string mapName, int players = 2)
         {
             editing = s;
+            setupPlayers = Mathf.Clamp(players, 2, Armies.Max);
             if (!setupRowsBuilt) BuildSetupRows();
-            setupMapName.text = "マップ: " + mapName;
-            Select(segRed, s.Players[0]);
-            Select(segBlue, s.Players[1]);
-            Select(segRedStyle, s.Styles[0]);
-            Select(segBlueStyle, s.Styles[1]);
-            UpdateStyleRows();
+            setupMapName.text = "マップ: " + mapName + (setupPlayers > 2 ? "(" + setupPlayers + "軍)" : "");
+            UpdateArmyRows();
             Select(segSpeed, s.Speed);
             Select(segAnim, s.BattleAnimation ? 0 : 1);
-            Select(segBgm, s.BgmEnabled ? 0 : 1);
-            SetSlider(setupBgmVol, setupBgmVal, s.BgmVolume);
-            SetSlider(setupSeVol, setupSeVal, s.SeVolume);
+            SetSlider(setupTurn, setupTurnVal, TurnTime.ToStep(s.TurnSeconds));
             ShowOnly(setupRoot, setupStart);
         }
 
-        /// <summary>The 戦法 row of an army is shown only while that army is a COM.</summary>
-        void UpdateStyleRows()
+        /// <summary>Shows the map's armies; the 戦法 button only for a COM; at least two armies must play.</summary>
+        void UpdateArmyRows()
         {
-            if (editing == null || segRedStyle == null) return;
-            bool r = editing.Players[0] > 0, b = editing.Players[1] > 0;
-            foreach (var x in segRedStyle) if (x.gameObject.activeSelf != r) x.gameObject.SetActive(r);
-            foreach (var x in segBlueStyle) if (x.gameObject.activeSelf != b) x.gameObject.SetActive(b);
-            styleLabelRed.gameObject.SetActive(r);
-            styleLabelBlue.gameObject.SetActive(b);
-        }
-
-        static int Nearest(int v)
-        {
-            int best = VolumeSteps[0];
-            foreach (var s in VolumeSteps) if (Math.Abs(s - v) < Math.Abs(best - v)) best = s;
-            return best;
+            if (editing == null || armyRows.Count == 0) return;
+            editing.Seated(setupPlayers);   // keeps at least two armies in the game
+            for (int a = 0; a < armyRows.Count; a++)
+            {
+                var row = armyRows[a];
+                bool shown = a < setupPlayers;
+                row.tab.gameObject.SetActive(shown);
+                int p = editing.Players[a];
+                for (int i = 0; i < row.kind.Count; i++)
+                {
+                    bool on = shown && (i < 5 || setupPlayers > 2);
+                    if (row.kind[i].gameObject.activeSelf != on) row.kind[i].gameObject.SetActive(on);
+                }
+                Select(row.kind, p == GameSettings.Nobody ? 5 : p);
+                bool com = shown && p > 0;
+                row.style.gameObject.SetActive(com);
+                if (com) SetText(row.style.GetComponentInChildren<TextMeshProUGUI>(), StyleText(editing.Styles[a]));
+            }
         }
 
         // ---------- small builders ----------
 
-        void ArmyTab(Army a, float y)
+        RectTransform ArmyTab(Army a, float y)
         {
             var tab = Panel("Tab" + a, setupCard, ArmyColor(a));
             tab.GetComponent<Image>().raycastTarget = false;
@@ -337,6 +339,7 @@ namespace FamiconWars.Game
             var t = Label("Name", tab, SizeBody, Color.white, TextAlignmentOptions.Center, true);
             t.text = Labels.Army(a);
             Fill(t.rectTransform, 4, 0, 4, 0);
+            return tab;
         }
 
         TextMeshProUGUI RowLabel(string text, float y)
@@ -355,14 +358,14 @@ namespace FamiconWars.Game
         }
 
         /// <summary>Segmented choice row. Picking one re-styles the row in place.</summary>
-        List<Button> Segment(float y, float h, string[] labels, Action<int> pick)
+        List<Button> Segment(float y, float h, string[] labels, Action<int> pick, float w = 150, float step = 160)
         {
             var list = new List<Button>();
             for (int k = 0; k < labels.Length; k++)
             {
                 int idx = k;
                 var b = MakeButton("Seg_" + labels[k], setupCard, labels[k], false, () => { pick(idx); Select(list, idx); });
-                Pin((RectTransform)b.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240 + k * 160, y), new Vector2(150, h), pivot: new Vector2(0, 1));
+                Pin((RectTransform)b.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240 + k * step, y), new Vector2(w, h), pivot: new Vector2(0, 1));
                 list.Add(b);
             }
             return list;

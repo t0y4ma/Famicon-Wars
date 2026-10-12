@@ -9,17 +9,19 @@ namespace FamiconWars.Core
         static readonly int[] DX = { 1, -1, 0, 0 };
         static readonly int[] DY = { 0, 0, 1, -1 };
 
-        /// <summary>Call once after GameState.Create: starts Red's first phase (income from day 1).</summary>
+        /// <summary>Call once after GameState.Create: starts the first army's phase (income from day 1).</summary>
         public static ApplyResult StartGame(GameState s)
         {
             var r = new ApplyResult();
-            StartPhase(s, Army.Red, r);
+            var first = s.Out[0] ? NextAlive(s, Army.Red) : Army.Red;
+            StartPhase(s, first, r);
             return r;
         }
 
         public static string Check(GameState s, Command c)
         {
             if (s.GameOver) return "対戦は終了しています";
+            if (!(c is AbortCommand) && ((int)c.Army < 0 || (int)c.Army >= s.Players || s.IsOut(c.Army))) return "対戦に参加していない軍です";
             // surrender is allowed at any time (an online player who leaves gives up even off-turn)
             if (c.Army != s.Active && !(c is SurrenderCommand) && !(c is AbortCommand)) return "手番ではありません";
             switch (c)
@@ -45,13 +47,24 @@ namespace FamiconWars.Core
                 case ProduceCommand pc: ExecProduce(s, pc, r); break;
                 case ResupplyAllCommand _: ExecResupply(s, r); break;
                 case EndPhaseCommand _: EndPhase(s, r); break;
-                case SurrenderCommand _: Finish(s, Other(c.Army), "降伏", r); break;
+                case SurrenderCommand _: Eliminate(s, c.Army, Army.None, "降伏", -1, r); break;
                 case AbortCommand _: Finish(s, Army.None, "対戦を途中で終了", r); break;
             }
+            // the army whose turn it is went out (routed by a counterattack, surrendered): the next one plays
+            if (!s.GameOver && s.IsOut(s.Active)) EndPhase(s, r);
             return r;
         }
 
-        public static Army Other(Army a) => a == Army.Red ? Army.Blue : Army.Red;
+        /// <summary>The next army still in the game after a (in turn order, wrapping round).</summary>
+        public static Army NextAlive(GameState s, Army a)
+        {
+            for (int k = 1; k <= s.Players; k++)
+            {
+                int n = ((int)a + k) % s.Players;
+                if (!s.Out[n]) return (Army)n;
+            }
+            return a;
+        }
 
         // ---------------- unit command ----------------
 
@@ -183,7 +196,7 @@ namespace FamiconWars.Core
                         ev.Completed = true;
                         r.Events.Add(ev);
                         if (s.TerrainAt(c.ToX, c.ToY).Id == "HQ" && previous != Army.None)
-                            Finish(s, u.Army, "基地占領", r);
+                            Eliminate(s, previous, u.Army, "基地占領", dest, r);
                     }
                     else r.Events.Add(ev);
                     break;
@@ -287,14 +300,52 @@ namespace FamiconWars.Core
 
         static void CheckRout(GameState s, ApplyResult r)
         {
-            if (s.GameOver) return;
-            for (int a = 0; a < 2; a++)
+            for (int a = 0; a < s.Players; a++)
             {
-                if (!s.HadUnits[a]) continue;
+                if (s.GameOver) return;
+                if (s.Out[a] || !s.HadUnits[a]) continue;
                 bool any = false;
                 foreach (var u in s.Units) if ((int)u.Army == a) { any = true; break; }
-                if (!any) { Finish(s, Other((Army)a), "全滅", r); return; }
+                if (!any) Eliminate(s, (Army)a, Army.None, "全滅", -1, r);
             }
+        }
+
+        /// <summary>
+        /// Army a is out. With one army left that army wins (two armies: exactly the old rules). Otherwise
+        /// the game goes on: the army that took a's base (by) gets all of a's properties and the base
+        /// becomes a city; when routed or surrendered, a's properties turn neutral. a's units are removed.
+        /// </summary>
+        static void Eliminate(GameState s, Army a, Army by, string reason, int hqTile, ApplyResult r)
+        {
+            if (s.GameOver || s.IsOut(a)) return;
+            s.Out[(int)a] = true;
+            s.Eliminated.Add(a);
+            if (s.AliveCount <= 1)
+            {
+                Army last = Army.None;
+                for (int k = 0; k < s.Players; k++) if (!s.Out[k]) last = (Army)k;
+                Finish(s, last, reason, r);
+                return;
+            }
+            for (int i = 0; i < s.Owner.Length; i++)
+            {
+                if (s.Owner[i] != a) continue;
+                s.Owner[i] = by;
+                // a capture the new owner had under way there is no longer needed
+                var cu = s.CapturingUnit[i] >= 0 ? s.UnitById(s.CapturingUnit[i]) : null;
+                if (cu != null && cu.Army == by) { s.CapturingUnit[i] = -1; s.CaptureProgress[i] = 0; }
+            }
+            int hx = -1, hy = -1;
+            if (hqTile >= 0)
+            {
+                // one base per army: the captured one becomes a city
+                foreach (var t in s.Data.Terrains) if (t.Id == "CITY") { s.Terrain[hqTile] = t.Index; break; }
+                hx = hqTile % s.Width; hy = hqTile / s.Width;
+            }
+            r.Events.Add(new EliminatedEvent { Army = a, By = by, Reason = reason, X = hx, Y = hy });
+            var gone = new List<UnitState>();
+            foreach (var u in s.Units) if (u.Army == a && !u.IsCarried) gone.Add(u);
+            foreach (var u in gone) if (s.Units.Contains(u)) RemoveUnit(s, u, r, "敗退");
         }
 
         static void Finish(GameState s, Army winner, string reason, ApplyResult r)
@@ -422,8 +473,8 @@ namespace FamiconWars.Core
 
         static void EndPhase(GameState s, ApplyResult r)
         {
-            var next = Other(s.Active);
-            if (s.Active == Army.Blue)
+            var next = NextAlive(s, s.Active);
+            if ((int)next <= (int)s.Active)   // every army has had its phase: a new day
             {
                 s.Day++;
                 if (s.Day > s.Rules.TimeLimit) { Finish(s, Army.None, "時間切れ", r); return; }
@@ -456,6 +507,8 @@ namespace FamiconWars.Core
             }
             foreach (var u in lost) RemoveUnit(s, u, r, s.Def(u).Domain == Domain.Air ? "墜落" : "沈没");
             CheckRout(s, r);
+            // every unit of this army was lost at the start of its own phase: on to the next army
+            if (!s.GameOver && s.IsOut(a)) EndPhase(s, r);
         }
     }
 }

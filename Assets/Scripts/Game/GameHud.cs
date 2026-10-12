@@ -171,11 +171,16 @@ namespace FamiconWars.Game
             // ---- game actions of a phase: at the bottom of the screen, under the board ----
             actionPanel = Panel("PhaseActions", canvasRt, new Color(Plate.r, Plate.g, Plate.b, 0.92f));
             Pin(actionPanel, new Vector2(0.5f, 0), new Vector2(0.5f, 0), new Vector2(0, 24), new Vector2(392, 76), pivot: new Vector2(0.5f, 0));
+            actionPanelRt = actionPanel;
             Edge(actionPanel, PlateEdge);
             resupplyBtn = MakeButton("Resupply", actionPanel, "全補", false, () => OnResupply?.Invoke());
             Pin((RectTransform)resupplyBtn.transform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(12, 0), new Vector2(140, 56), pivot: new Vector2(0, 0.5f));
             endBtn = MakeButton("EndPhase", actionPanel, "手番終了", true, () => OnEndPhase?.Invoke());
             Pin((RectTransform)endBtn.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-12, 0), new Vector2(216, 56), pivot: new Vector2(1, 0.5f));
+            // time left in this phase (only with a time limit): between the two buttons
+            turnClock = Label("TurnClock", actionPanel, SizeNumber, Paper, TextAlignmentOptions.Center, true);
+            Pin(turnClock.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(164, 0), new Vector2(140, 56), pivot: new Vector2(0, 0.5f));
+            turnClock.gameObject.SetActive(false);
             actionPanel.gameObject.SetActive(false);
         }
 
@@ -208,7 +213,8 @@ namespace FamiconWars.Game
             dayText.text = s.Day + "<size=60%> 日目</size>";
             fundsText.text = s.Funds[(int)s.Active].ToString("N0");
             int units = RulesEngine.UnitCount(s, s.Active);
-            incomeText.text = "収入 +" + income.ToString("N0") + "/日　部隊 " + (units >= s.Rules.UnitLimit ? "<color=#F07A62>" + units + "</color>" : units.ToString()) + "/" + s.Rules.UnitLimit + "\n相手資金 " + s.Funds[1 - (int)s.Active].ToString("N0");
+            incomeText.text = "収入 +" + income.ToString("N0") + "/日　部隊 " + (units >= s.Rules.UnitLimit ? "<color=#F07A62>" + units + "</color>" : units.ToString()) + "/" + s.Rules.UnitLimit
+                + (s.Players == 2 ? "\n相手資金 " + s.Funds[1 - (int)s.Active].ToString("N0") : "\n残り " + s.AliveCount + " 軍");
             bool live = !s.GameOver && humanTurn;
             resupplyBtn.interactable = live && !s.ResupplyUsed[(int)s.Active];
             endBtn.interactable = live;
@@ -304,7 +310,7 @@ namespace FamiconWars.Game
                 var icon = UnitIcons.Get(d.Id, u.Army);
                 unitSwatch.sprite = icon;
                 unitSwatch.color = icon != null ? Color.white : ArmyColor(u.Army);
-                unitSwatch.rectTransform.localScale = new Vector3(u.Army == Army.Blue ? -1 : 1, 1, 1);
+                unitSwatch.rectTransform.localScale = new Vector3(ArmyStyle.FacesLeft(u.Army) ? -1 : 1, 1, 1);
                 unitName.text = Labels.Get(d.NameKey);
                 unitCount.text = "<size=60%>×</size>" + u.Count;
                 unitCount.color = u.Count <= 3 ? Danger : Paper;
@@ -329,6 +335,7 @@ namespace FamiconWars.Game
             if (actionPanel != null) actionPanel.gameObject.SetActive(on);
             ShowZoomWidget(on);
             if (!on) infoCard.gameObject.SetActive(false);
+            if (!on && playersRoot != null) playersRoot.gameObject.SetActive(false);
         }
 
         // ================= hint / toast =================
@@ -453,7 +460,7 @@ namespace FamiconWars.Game
                 if (pic.sprite == null) pic.color = Color.clear;
                 else if (!afford) pic.color = new Color(1, 1, 1, 0.4f);
                 Pin(pic.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(14, 0), new Vector2(46, 46), pivot: new Vector2(0, 0.5f));
-                pic.rectTransform.localScale = new Vector3(army == Army.Blue ? -1 : 1, 1, 1);
+                pic.rectTransform.localScale = new Vector3(ArmyStyle.FacesLeft(army) ? -1 : 1, 1, 1);
                 var stats = Label("Stats", b.transform, SizeSmall, afford ? Muted : Danger, TextAlignmentOptions.MidlineRight, false);
                 stats.text = afford ? $"移{d.Move}  射{d.RangeMin}-{d.RangeMax}  燃{d.Fuel}" : "資金不足";
                 Fill(stats.rectTransform, 220, 0, 150, 0);
@@ -507,6 +514,10 @@ namespace FamiconWars.Game
         {
             overPanel = Panel("GameOver", canvasRt, Plate);
             Pin(overPanel, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(620, 300));
+            overRanking = Label("Ranking", overPanel, SizeBody, Paper, TextAlignmentOptions.TopLeft, false);
+            overRanking.richText = true; overRanking.lineSpacing = 10;
+            Pin(overRanking.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -184), new Vector2(-120, 200), pivot: new Vector2(0.5f, 1), stretchX: true);
+            overRanking.gameObject.SetActive(false);
             overStripe = Panel("Stripe", overPanel, Color.white).GetComponent<Image>();
             Pin((RectTransform)overStripe.transform, new Vector2(0, 1), new Vector2(1, 1), Vector2.zero, new Vector2(0, 14), pivot: new Vector2(0.5f, 1), stretchX: true);
             overTitle = Label("Title", overPanel, SizeBanner, Paper, TextAlignmentOptions.Center, true);
@@ -518,8 +529,14 @@ namespace FamiconWars.Game
             overPanel.gameObject.SetActive(false);
         }
 
-        public void ShowGameOver(Army winner, string reason)
+        /// <param name="ranking">Three or more armies: one line per army, winner first (null: none).</param>
+        public void ShowGameOver(Army winner, string reason, string ranking = null)
         {
+            bool ranked = !string.IsNullOrEmpty(ranking);
+            overRanking.gameObject.SetActive(ranked);
+            if (ranked) overRanking.text = ranking;
+            int rows = ranked ? ranking.Split('\n').Length : 0;
+            ((RectTransform)overPanel).sizeDelta = new Vector2(620, 300 + (ranked ? rows * 46 + 24 : 0));
             dim.gameObject.SetActive(true);
             dim.SetAsLastSibling();
             overPanel.SetAsLastSibling();
@@ -540,6 +557,7 @@ namespace FamiconWars.Game
         void Update()
         {
             UpdateBattle();
+            UpdatePlayersFade();
             if (toastPlate != null && toastPlate.gameObject.activeSelf && Time.unscaledTime > toastUntil) toastPlate.gameObject.SetActive(false);
             if (bannerT >= 0)
             {
@@ -555,8 +573,8 @@ namespace FamiconWars.Game
 
         // ================= helpers =================
 
-        public static Color ArmyColor(Army a) => a == Army.Red ? Hex("#C8423A") : a == Army.Blue ? Hex("#3A6AD0") : Muted;
-        static Color ArmyTextColor(Army a) => a == Army.Red ? Hex("#FF8A7E") : a == Army.Blue ? Hex("#8FB2FF") : Muted;
+        public static Color ArmyColor(Army a) => a == Army.None ? Muted : ArmyStyle.Ui(a);
+        static Color ArmyTextColor(Army a) => a == Army.None ? Muted : ArmyStyle.Text(a);
 
         static Color Hex(string h) { ColorUtility.TryParseHtmlString(h, out var c); return c; }
 
