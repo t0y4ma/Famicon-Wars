@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using FamiconWars.Core;
 using UnityEngine;
 
@@ -31,6 +32,8 @@ namespace FamiconWars.Game
         public bool BattleAnimation = true;
         /// <summary>Exact numbers (machines left after an attack, damage in the matchup chart) or words only.</summary>
         public bool ShowNumbers = true;
+        /// <summary>Moving the cursor to a screen edge scrolls the board.</summary>
+        public bool EdgeScroll = true;
 
         // ---- WIP: sound (properties only) ----
         public bool BgmEnabled = true;
@@ -103,10 +106,20 @@ namespace FamiconWars.Game
         public bool Ready;
     }
 
-    /// <summary>Maps shown on the map-select screen. Unready entries are placeholders (WIP).</summary>
+    /// <summary>
+    /// Maps shown on the map-select screen: the built-in list below (its order and notes), then any other
+    /// map file in Resources/Maps (made with the map editor). A file's own header (name=, note=, size)
+    /// takes precedence over the list. Unready entries are placeholders (WIP).
+    /// </summary>
     public static class MapCatalog
     {
-        public static readonly MapEntry[] All =
+        static MapEntry[] all;
+        public static MapEntry[] All => all ??= Load();
+
+        /// <summary>Read the map files again (after the map editor saved one).</summary>
+        public static void Reload() => all = null;
+
+        static readonly MapEntry[] Builtin =
         {
             new MapEntry { Id = "map01", Name = "演習島", Width = 18, Height = 12, Ready = true,
                 Note = "川で分かれた2つの陸地を3本の橋がつなぐ。最初の一戦に。" },
@@ -121,10 +134,67 @@ namespace FamiconWars.Game
             new MapEntry { Id = "map06", Name = "対戦用 B", Width = 22, Height = 15, Ready = true,
                 Note = "中央を川が横切る点対称マップ。橋と浅瀬で10か所から渡れ、川べりの都市を奪い合う。" },
             new MapEntry { Id = "map07", Name = "四つ巴", Width = 22, Height = 22, Players = 4, Ready = true,
-                Note = "4軍が四隅から。どの軍も同じ地形(90度ずつ回した形)。中央の4都市の取り合い。2〜4人で遊べる。" },
+                Note = "4軍が四隅から。どの軍も同じ地形。中央の4都市の取り合い。2〜4人で遊べる。" },
             new MapEntry { Id = "map08", Name = "三国峠", Width = 23, Height = 16, Players = 3, Ready = true,
                 Note = "3軍の基地はどれも同じ距離。下の軍は2軍に挟まれやすい代わりに、基地の近くに空港が2つある。" },
         };
+
+        static MapEntry[] Load()
+        {
+            var files = new Dictionary<string, string>();
+            foreach (var ta in Resources.LoadAll<TextAsset>("Maps")) files[ta.name] = ta.text;
+            var list = new List<MapEntry>();
+            foreach (var b in Builtin)
+            {
+                var e = new MapEntry { Id = b.Id, Name = b.Name, Note = b.Note, Width = b.Width, Height = b.Height, Players = b.Players, Ready = b.Ready };
+                if (files.TryGetValue(b.Id, out var text)) ReadHeader(e, text);
+                else if (files.Count > 0) continue;            // the file is gone
+                list.Add(e);
+            }
+            var extra = new List<string>(files.Keys);
+            extra.Sort(StringComparer.Ordinal);
+            foreach (var id in extra)
+            {
+                if (list.Exists(m => m.Id == id)) continue;
+                var e = new MapEntry { Id = id, Name = id, Note = "", Ready = true };
+                ReadHeader(e, files[id]);
+                list.Add(e);
+            }
+            return list.ToArray();
+        }
+
+        /// <summary>name=, note=, width=, height= and the number of armies (owner letters and units).</summary>
+        public static void ReadHeader(MapEntry e, string text)
+        {
+            string section = "";
+            int rows = 0, cols = 0, top = 1;
+            foreach (var raw in text.Replace("\r", "").Split('\n'))
+            {
+                var line = raw.TrimStart('\uFEFF').TrimEnd();
+                if (line.Length == 0) continue;
+                if (line.StartsWith("[")) { section = line; continue; }
+                if (section == "")
+                {
+                    int k = line.IndexOf('=');
+                    if (k < 0) continue;
+                    string key = line.Substring(0, k), v = line.Substring(k + 1);
+                    if (key == "name" && v.Length > 0) e.Name = v;
+                    else if (key == "note") e.Note = v;
+                    else if (key == "width" && int.TryParse(v, out var w)) e.Width = w;
+                    else if (key == "height" && int.TryParse(v, out var h)) e.Height = h;
+                }
+                else if (section == "[tiles]") { rows++; cols = Math.Max(cols, line.Length); }
+                else if (section == "[owners]") { foreach (char c in line) top = Math.Max(top, (int)Armies.FromLetter(c)); }
+                else if (section == "[units]")
+                {
+                    var p = line.Split(',');
+                    if (p.Length > 1 && Enum.TryParse<Army>(p[1].Trim(), out var a)) top = Math.Max(top, (int)a);
+                }
+            }
+            if (e.Width == 0) e.Width = cols;
+            if (e.Height == 0) e.Height = rows;
+            e.Players = Math.Max(2, top + 1);
+        }
 
         public static MapEntry Find(string id)
         {

@@ -11,8 +11,8 @@
   <Project Path="Mirror.Authenticators.csproj" />
   <Project Path="Mirror.Transports.csproj" />
   <Project Path="EncryptionTransportEditor.csproj" />
-  <Project Path="Telepathy.csproj" />
   <Project Path="Assembly-CSharp-Editor.csproj" />
+  <Project Path="Telepathy.csproj" />
   <Project Path="FamiconWars.Core.csproj" />
   <Project Path="FamiconWars.Tests.EditMode.csproj" />
   <Project Path="Mirror.CompilerSymbols.csproj" />

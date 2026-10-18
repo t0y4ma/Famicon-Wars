@@ -139,6 +139,63 @@ namespace FamiconWars.Tests
             Assert.AreEqual(idA, Last<RoomStatus>(1).HostId, "a seated player inherits the host role");
         }
 
+        /// <summary>内政 online: reserving off-turn, the 内政 time after a BOT's phase, and its end by 「内政終了」.</summary>
+        [Test]
+        public void DomesticWorksOffTurnAndAfterABotPhase()
+        {
+            var dir = Path.Combine(Application.dataPath, "Resources/Data");
+            string R(string f) => File.ReadAllText(Path.Combine(dir, f));
+            data = GameData.Load(R("units.csv"), R("terrains.csv"), R("damage.csv"), R("rules.csv"), R("economy.csv"), R("production.csv"));
+            server = new OnlineRoomServer(data, id => id == "map01" ? MapDef.Parse(mapText, data) : null,
+                (c, m) => { if (!inbox.TryGetValue(c, out var l)) inbox[c] = l = new List<ServerMsg>(); l.Add(m); },
+                () => seed = seed * 1664525u + 1013904223u, 1);
+            server.Create(1, "tokA", "Aさん", "map01");
+            var code = Last<RoomStatus>(1).Code;
+            server.Action(1, "bot", 1, "1");
+            server.Action(1, "start", 0, null);
+            var room = server.Find(code);
+            Assert.IsTrue(room.State.Domestic);
+            room.State.Funds[0] = 50000;
+
+            server.Play(1, CommandCodec.Encode(new LevelUpCommand { Army = Army.Red, X = 6, Y = 9 }));
+            StringAssert.Contains("手番中", Last<Rejected>(1)?.Error ?? "", "not in our own phase");
+            server.Play(1, CommandCodec.Encode(new EndInterludeCommand { Army = Army.Red }));
+            Assert.AreEqual("不正なコマンドです", Last<Rejected>(1).Error, "only the server ends a 内政 time");
+
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red, Interlude = true }));
+            Assert.IsFalse(room.State.Interlude, "a player cannot ask for a 内政 time after their own phase");
+            Assert.AreEqual(Army.Blue, room.State.Active);
+            int applied = Box(1).OfType<Applied>().Count();
+            server.Play(1, CommandCodec.Encode(new LevelUpCommand { Army = Army.Red, X = 6, Y = 9 }));
+            Assert.AreEqual(applied + 1, Box(1).OfType<Applied>().Count(), "accepted during the BOT's phase");
+            Assert.AreEqual(GameState.ReserveLevelUp, room.State.Reserve[room.State.Index(6, 9)]);
+
+            double t = 0;
+            for (int k = 0; k < 600 && !room.State.Interlude && room.State.Active == Army.Blue; k++) server.Tick(t += 1);
+            Assert.IsTrue(room.State.Interlude, "the BOT's phase is followed by a 内政 time");
+            Assert.AreEqual(Army.Blue, room.State.Active);
+            server.Tick(t += 1);
+            Assert.IsTrue(room.State.Interlude, "it waits for the person");
+            server.Play(1, CommandCodec.Encode(new LevelUpCommand { Army = Army.Red, X = 2, Y = 9 }));
+            Assert.AreEqual(GameState.ReserveLevelUp, room.State.Reserve[room.State.Index(2, 9)]);
+            server.Play(1, CommandCodec.Encode(new InterludeDoneCommand { Army = Army.Red }));
+            server.Tick(t += 1);
+            Assert.IsFalse(room.State.Interlude);
+            Assert.AreEqual(Army.Red, room.State.Active);
+            Assert.AreEqual(2, room.State.LevelAt(6, 9));
+            Assert.AreEqual(2, room.State.LevelAt(2, 9));
+            Assert.IsTrue(room.Cmds.Any(c => c == "E,1,1"), "the server marked the BOT's end of phase");
+            // a 内政 time that nobody ends runs out with the room's time per phase
+            server.Play(1, CommandCodec.Encode(new EndPhaseCommand { Army = Army.Red }));
+            for (int k = 0; k < 600 && !room.State.Interlude && room.State.Active == Army.Blue; k++) server.Tick(t += 1);
+            Assert.IsTrue(room.State.Interlude);
+            if (room.TurnSeconds > 0)
+            {
+                server.Tick(t += room.TurnSeconds + server.TurnGrace + 1);
+                Assert.IsFalse(room.State.Interlude);
+            }
+        }
+
         [Test]
         public void BotSeatPlaysByItselfAndSpectatorsWatch()
         {

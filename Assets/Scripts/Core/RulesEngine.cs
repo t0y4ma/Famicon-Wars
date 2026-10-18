@@ -21,7 +21,11 @@ namespace FamiconWars.Core
         public static string Check(GameState s, Command c)
         {
             if (s.GameOver) return "対戦は終了しています";
+            if (c is EndInterludeCommand) return s.Interlude ? null : "内政の時間ではありません";
             if (!(c is AbortCommand) && ((int)c.Army < 0 || (int)c.Army >= s.Players || s.IsOut(c.Army))) return "対戦に参加していない軍です";
+            if (IsDomestic(c)) return CheckDomestic(s, c);
+            // in the 内政 time nothing but 内政 (and giving up) happens
+            if (s.Interlude && !(c is SurrenderCommand) && !(c is AbortCommand)) return "内政の時間です";
             // surrender is allowed at any time (an online player who leaves gives up even off-turn)
             if (c.Army != s.Active && !(c is SurrenderCommand) && !(c is AbortCommand)) return "手番ではありません";
             switch (c)
@@ -46,7 +50,9 @@ namespace FamiconWars.Core
                 case UnitCommand uc: ExecUnit(s, uc, r); break;
                 case ProduceCommand pc: ExecProduce(s, pc, r); break;
                 case ResupplyAllCommand _: ExecResupply(s, r); break;
-                case EndPhaseCommand _: EndPhase(s, r); break;
+                case EndPhaseCommand ep: EndPhase(s, r, ep.Interlude); break;
+                case EndInterludeCommand _: s.Interlude = false; r.Events.Add(new InterludeEvent { Started = false, After = s.Active }); EndPhase(s, r); break;
+                case LevelUpCommand _: case ConvertCommand _: case CancelReserveCommand _: case InterludeDoneCommand _: ExecDomestic(s, c, r); break;
                 case SurrenderCommand _: Eliminate(s, c.Army, Army.None, "降伏", -1, r); break;
                 case AbortCommand _: Finish(s, Army.None, "対戦を途中で終了", r); break;
             }
@@ -186,11 +192,13 @@ namespace FamiconWars.Core
                 {
                     if (s.CapturingUnit[dest] != u.Id) { s.CapturingUnit[dest] = u.Id; s.CaptureProgress[dest] = 0; }
                     s.CaptureProgress[dest] += u.Count;
+                    // 内政: a capture order on a reserved facility cancels the reservation (the funds are gone)
+                    if (s.Domestic && s.Reserve[dest] != 0) LoseReservation(s, dest, r);
                     var ev = new CaptureEvent { UnitId = u.Id, X = c.ToX, Y = c.ToY, Progress = Math.Min(s.CaptureProgress[dest], s.Rules.CaptureGoal), Goal = s.Rules.CaptureGoal };
                     if (s.CaptureProgress[dest] >= s.Rules.CaptureGoal)
                     {
                         var previous = s.Owner[dest];
-                        s.Owner[dest] = u.Army;
+                        ChangeOwner(s, dest, u.Army);
                         s.CaptureProgress[dest] = 0;
                         s.CapturingUnit[dest] = -1;
                         ev.Completed = true;
@@ -330,7 +338,7 @@ namespace FamiconWars.Core
             for (int i = 0; i < s.Owner.Length; i++)
             {
                 if (s.Owner[i] != a) continue;
-                s.Owner[i] = by;
+                ChangeOwner(s, i, by);
                 // a capture the new owner had under way there is no longer needed
                 var cu = s.CapturingUnit[i] >= 0 ? s.UnitById(s.CapturingUnit[i]) : null;
                 if (cu != null && cu.Army == by) { s.CapturingUnit[i] = -1; s.CaptureProgress[i] = 0; }
@@ -360,11 +368,42 @@ namespace FamiconWars.Core
 
         public static bool InProductionRange(GameState s, Army army, int x, int y)
         {
+            if (s.Domestic)
+            {
+                // the reach depends on each base's level (-1 = anywhere)
+                for (int i = 0; i < s.Owner.Length; i++)
+                {
+                    if (s.Owner[i] != army || s.Data.Terrains[s.Terrain[i]].Id != "HQ") continue;
+                    int r = s.Data.Economy.RadiusFor(s.Level[i]);
+                    int hx = i % s.Width, hy = i / s.Width;
+                    if (r < 0 || (Math.Abs(hx - x) <= r && Math.Abs(hy - y) <= r)) return true;
+                }
+                return false;
+            }
             int rad = s.Rules.ProductionRadius;
             for (int yy = y - rad; yy <= y + rad; yy++)
                 for (int xx = x - rad; xx <= x + rad; xx++)
                     if (s.InBounds(xx, yy) && s.TerrainAt(xx, yy).Id == "HQ" && s.Owner[s.Index(xx, yy)] == army) return true;
             return false;
+        }
+
+        /// <summary>The facility makes this unit at its current level (内政); always true without 内政 when the domain fits.</summary>
+        public static bool LevelAllows(GameState s, int x, int y, UnitDef d)
+        {
+            if (!s.Domestic) return true;
+            int need = s.Data.Economy.Required(s.TerrainAt(x, y), d);
+            return need > 0 && s.LevelAt(x, y) >= need;
+        }
+
+        /// <summary>Every unit of the facility's kind, with the level each needs (0 = never here). For the production menu.</summary>
+        public static List<(UnitDef def, int need)> ProductionTable(GameState s, int x, int y)
+        {
+            var list = new List<(UnitDef, int)>();
+            var t = s.TerrainAt(x, y);
+            if (t.Produces == null) return list;
+            foreach (var d in s.Data.Units)
+                if (d.Domain == t.Produces.Value) list.Add((d, s.Domestic ? s.Data.Economy.Required(t, d) : 1));
+            return list;
         }
 
         public static List<UnitDef> ProducibleAt(GameState s, Army army, int x, int y)
@@ -374,7 +413,7 @@ namespace FamiconWars.Core
             var t = s.TerrainAt(x, y);
             if (!t.IsProperty || t.Produces == null || s.Owner[s.Index(x, y)] != army) return list;
             if (!InProductionRange(s, army, x, y) || s.UnitAt(x, y) != null) return list;
-            foreach (var d in s.Data.Units) if (d.Domain == t.Produces.Value) list.Add(d);
+            foreach (var d in s.Data.Units) if (d.Domain == t.Produces.Value && LevelAllows(s, x, y, d)) list.Add(d);
             return list;
         }
 
@@ -389,6 +428,11 @@ namespace FamiconWars.Core
             if (s.UnitAt(c.X, c.Y) != null) return "施設の上に部隊がいます";
             try { def = s.Data.Unit(c.UnitType); } catch (KeyNotFoundException) { return "不明な部隊です"; }
             if (def.Domain != t.Produces.Value) return "この施設では生産できない部隊です";
+            if (!LevelAllows(s, c.X, c.Y, def))
+            {
+                int need = s.Data.Economy.Required(t, def);
+                return need > 0 ? "施設レベル" + need + "で生産できます" : "この施設では生産できない部隊です";
+            }
             if (s.Funds[(int)c.Army] < def.Price) return "資金が足りません";
             if (UnitCount(s, c.Army) >= s.Rules.UnitLimit) return "部隊数が上限(" + s.Rules.UnitLimit + ")に達しています";
             return null;
@@ -406,7 +450,15 @@ namespace FamiconWars.Core
         {
             CheckProduce(s, c, out var def);
             s.Funds[(int)c.Army] -= def.Price;
-            var u = s.SpawnUnit(def.Index, c.Army, c.X, c.Y, 100, true);
+            bool ready = false;
+            if (s.Domestic)
+            {
+                // a facility at the top levels sends its first unit of the phase out ready to move
+                var e = s.Data.Economy; int i = s.Index(c.X, c.Y);
+                if (e.FreeActLevel > 0 && s.Level[i] >= e.FreeActLevel && e.FreeActTerrains.Contains(s.TerrainAt(c.X, c.Y).Id) && s.FreeActUsed[i] != s.PhaseKey)
+                { ready = true; s.FreeActUsed[i] = s.PhaseKey; }
+            }
+            var u = s.SpawnUnit(def.Index, c.Army, c.X, c.Y, 100, !ready);
             r.Events.Add(new ProducedEvent { UnitId = u.Id });
         }
 
@@ -469,10 +521,176 @@ namespace FamiconWars.Core
             r.Events.Add(ev);
         }
 
+        /// <summary>Income of the facility on tile i per phase (its level counts with 内政).</summary>
+        public static int Income(GameState s, int i)
+        {
+            int b = s.Data.Terrains[s.Terrain[i]].Income;
+            return s.Domestic ? s.Data.Economy.IncomeFor(b, s.Level[i]) : b;
+        }
+
+        // ---------------- 内政 ----------------
+
+        static bool IsDomestic(Command c) => c is LevelUpCommand || c is ConvertCommand || c is CancelReserveCommand || c is InterludeDoneCommand;
+
+        /// <summary>内政 is open to this army now: while another army plays, or in the 内政 time.</summary>
+        public static bool DomesticOpen(GameState s, Army a)
+        {
+            if (!s.Domestic || s.GameOver || a == Army.None || (int)a >= s.Players || s.IsOut(a)) return false;
+            if (s.Data.Economy.Timing == DomesticTiming.InterludeOnly) return s.Interlude;
+            return s.Interlude || a != s.Active;
+        }
+
+        static string CheckDomestic(GameState s, Command c)
+        {
+            if (!s.Domestic) return "内政はありません";
+            if (c is InterludeDoneCommand) return !s.Interlude ? "内政の時間ではありません" : s.InterludeReady[(int)c.Army] ? "内政終了済みです" : null;
+            if (!DomesticOpen(s, c.Army)) return s.Interlude || s.Data.Economy.Timing == DomesticTiming.OffTurn ? "自分の手番中は内政できません" : "内政の時間ではありません";
+            switch (c)
+            {
+                case CancelReserveCommand _:
+                {
+                    int i = s.LastReserve[(int)c.Army];
+                    if (i < 0 || s.Reserve[i] == 0 || s.Owner[i] != c.Army) return "取り消せる予約がありません";
+                    return null;
+                }
+                case LevelUpCommand lu: return CheckReserve(s, c.Army, lu.X, lu.Y, null, out _);
+                case ConvertCommand cv: return CheckReserve(s, c.Army, cv.X, cv.Y, cv.Target ?? "", out _);
+            }
+            return "不明なコマンド";
+        }
+
+        /// <summary>Whether the army may reserve on the tile now. target null = level up, else conversion into that terrain id.</summary>
+        public static string CheckReserve(GameState s, Army a, int x, int y, string target, out int cost)
+        {
+            cost = 0;
+            if (!s.InBounds(x, y)) return "マップの外です";
+            int i = s.Index(x, y);
+            var t = s.TerrainAt(x, y);
+            var e = s.Data.Economy;
+            if (!t.IsProperty) return "施設ではありません";
+            if (s.Owner[i] != a) return "自軍の施設ではありません";
+            if (s.Reserve[i] != 0) return "この施設は予約済みです";
+            if (s.CaptureProgress[i] > 0) return "占領されかけている施設は内政できません";
+            var on = s.UnitAt(x, y);
+            if (on != null && on.Army != a) return "敵の部隊がいる施設は内政できません";
+            if (target == null)
+            {
+                cost = e.LevelUpCost(t.Id, s.Level[i]);
+                if (s.Level[i] >= e.MaxLevel) return "レベルは最大です";
+                if (cost < 0) return "この施設はレベルを上げられません";
+            }
+            else
+            {
+                if (t.Id != e.ConvertFrom) return "転向できるのは都市だけです";
+                if (!e.ConvertCost.TryGetValue(target, out cost)) return "その施設には転向できません";
+                if (s.Level[i] < e.ConvertMinLevel) return "転向にはレベル" + e.ConvertMinLevel + "以上が必要です";
+                TerrainDef to;
+                try { to = s.Data.Terrain(target); } catch (KeyNotFoundException) { return "不明な施設です"; }
+                if (to.Produces == Domain.Sea && !FacesSea(s, x, y)) return "港にできるのは海に面した都市だけです";
+                if (on != null && to.Cost[(int)s.Def(on).MoveClass] < 0) return "上にいる部隊がいられなくなります";
+            }
+            if (s.Funds[(int)a] < cost) return "資金が足りません";
+            return null;
+        }
+
+        /// <summary>A neighbouring tile is open water a ship can use (sea or beach).</summary>
+        public static bool FacesSea(GameState s, int x, int y)
+        {
+            for (int k = 0; k < 4; k++)
+            {
+                int nx = x + DX[k], ny = y + DY[k];
+                if (!s.InBounds(nx, ny)) continue;
+                var n = s.TerrainAt(nx, ny);
+                if (!n.IsProperty && n.Cost[(int)MoveClass.Ship] >= 0) return true;
+            }
+            return false;
+        }
+
+        static void ExecDomestic(GameState s, Command c, ApplyResult r)
+        {
+            int a = (int)c.Army;
+            switch (c)
+            {
+                case InterludeDoneCommand _:
+                    s.InterludeReady[a] = true;
+                    break;
+                case CancelReserveCommand _:
+                {
+                    int i = s.LastReserve[a];
+                    s.Funds[a] += s.ReservePaid[i];
+                    r.Events.Add(new ReservedEvent { Army = c.Army, X = i % s.Width, Y = i / s.Width, Kind = s.Reserve[i], Cost = s.ReservePaid[i], Cancelled = true });
+                    s.Reserve[i] = 0; s.ReservePaid[i] = 0; s.LastReserve[a] = -1;
+                    break;
+                }
+                case LevelUpCommand lu: Reserve(s, c.Army, lu.X, lu.Y, null, r); break;
+                case ConvertCommand cv: Reserve(s, c.Army, cv.X, cv.Y, cv.Target, r); break;
+            }
+        }
+
+        static void Reserve(GameState s, Army a, int x, int y, string target, ApplyResult r)
+        {
+            CheckReserve(s, a, x, y, target, out int cost);
+            int i = s.Index(x, y);
+            s.Reserve[i] = target == null ? GameState.ReserveLevelUp : GameState.ReserveConvertBase + s.Data.Terrain(target).Index;
+            s.ReservePaid[i] = cost;
+            s.Funds[(int)a] -= cost;
+            s.LastReserve[(int)a] = i;    // the earlier ones can no longer be taken back
+            r.Events.Add(new ReservedEvent { Army = a, X = x, Y = y, Kind = s.Reserve[i], Cost = cost });
+        }
+
+        static void LoseReservation(GameState s, int i, ApplyResult r)
+        {
+            var owner = s.Owner[i];
+            if (r != null) r.Events.Add(new ReserveLostEvent { Army = owner, X = i % s.Width, Y = i / s.Width, Cost = s.ReservePaid[i] });
+            s.Reserve[i] = 0; s.ReservePaid[i] = 0;
+            if (owner != Army.None && s.LastReserve[(int)owner] == i) s.LastReserve[(int)owner] = -1;
+        }
+
+        /// <summary>A facility changes hands: any reservation on it is lost and (内政) it drops levels.</summary>
+        static void ChangeOwner(GameState s, int i, Army to)
+        {
+            if (s.Domestic)
+            {
+                if (s.Reserve[i] != 0) LoseReservation(s, i, null);
+                if (s.Level[i] > 0) s.Level[i] = Math.Max(1, s.Level[i] - s.Data.Economy.CaptureLevelDrop);
+            }
+            s.Owner[i] = to;
+        }
+
+        static void ApplyReservations(GameState s, Army a, ApplyResult r)
+        {
+            var e = s.Data.Economy;
+            for (int i = 0; i < s.Owner.Length; i++)
+            {
+                if (s.Owner[i] != a || s.Reserve[i] == 0) continue;
+                var ev = new LevelChangedEvent { Army = a, X = i % s.Width, Y = i / s.Width };
+                if (s.Reserve[i] == GameState.ReserveLevelUp) s.Level[i] = Math.Min(e.MaxLevel, s.Level[i] + 1);
+                else
+                {
+                    s.Terrain[i] = s.Reserve[i] - GameState.ReserveConvertBase;
+                    s.Level[i] = Math.Max(1, s.Level[i] - e.ConvertLevelDrop);
+                    ev.Converted = s.Data.Terrains[s.Terrain[i]].Id;
+                }
+                ev.Level = s.Level[i];
+                s.Reserve[i] = 0; s.ReservePaid[i] = 0;
+                r.Events.Add(ev);
+            }
+            s.LastReserve[(int)a] = -1;
+        }
+
         // ---------------- phases ----------------
 
-        static void EndPhase(GameState s, ApplyResult r)
+        static void EndPhase(GameState s, ApplyResult r, bool interlude = false)
         {
+            if (interlude && s.Domestic && !s.Interlude && !s.IsOut(s.Active))
+            {
+                // a COM played this phase: everyone gets a 内政 time before the next army moves
+                s.Interlude = true;
+                for (int a = 0; a < s.Players; a++) s.InterludeReady[a] = false;
+                r.Events.Add(new InterludeEvent { Started = true, After = s.Active });
+                return;
+            }
+            s.Interlude = false;
             var next = NextAlive(s, s.Active);
             if ((int)next <= (int)s.Active)   // every army has had its phase: a new day
             {
@@ -486,9 +704,10 @@ namespace FamiconWars.Core
         {
             s.Active = a;
             s.ResupplyUsed[(int)a] = false;
+            if (s.Domestic) ApplyReservations(s, a, r);    // before the income: a new level pays from this phase
             int income = 0;
             for (int i = 0; i < s.Owner.Length; i++)
-                if (s.Owner[i] == a) income += s.Data.Terrains[s.Terrain[i]].Income;
+                if (s.Owner[i] == a) income += Income(s, i);
             s.Funds[(int)a] += income;
             r.Events.Add(new PhaseStartEvent { Army = a, Day = s.Day, Income = income });
 

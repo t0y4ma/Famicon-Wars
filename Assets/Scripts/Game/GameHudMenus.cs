@@ -132,9 +132,19 @@ namespace FamiconWars.Game
             sub.text = "遊ぶマップを選んでください";
             Pin(sub.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(96, -108), new Vector2(800, 36), pivot: new Vector2(0, 1));
 
+            // the cards scroll (wheel / drag) when there are more maps than fit (maps made with the map editor)
+            var view = new GameObject("Viewport", typeof(RectTransform), typeof(RectMask2D), typeof(Image)).GetComponent<RectTransform>();
+            view.SetParent(mapRoot, false);
+            view.GetComponent<Image>().color = new Color(0, 0, 0, 0);
+            Pin(view, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0, 4), new Vector2(1460, 690));
             var grid = new GameObject("Grid", typeof(RectTransform));
-            mapGrid = (RectTransform)grid.transform; mapGrid.SetParent(mapRoot, false);
-            Pin(mapGrid, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0, 4), new Vector2(1440, 680));
+            mapGrid = (RectTransform)grid.transform; mapGrid.SetParent(view, false);
+            mapGrid.anchorMin = new Vector2(0.5f, 1); mapGrid.anchorMax = new Vector2(0.5f, 1); mapGrid.pivot = new Vector2(0.5f, 1);
+            mapGrid.anchoredPosition = new Vector2(0, -5); mapGrid.sizeDelta = new Vector2(1440, 680);
+            grid.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            var scroll = view.gameObject.AddComponent<ScrollRect>();
+            scroll.content = mapGrid; scroll.horizontal = false; scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped; scroll.scrollSensitivity = 40;
             var gl = grid.AddComponent<GridLayoutGroup>();
             gl.cellSize = new Vector2(464, 208); gl.spacing = new Vector2(24, 20);
             gl.childAlignment = TextAnchor.UpperCenter; gl.constraint = GridLayoutGroup.Constraint.FixedColumnCount; gl.constraintCount = 3;
@@ -286,7 +296,7 @@ namespace FamiconWars.Game
             setupTurn = MakeSlider("TurnTime", setupCard, new Vector2(240, y0 - 168), 860, out setupTurnVal,
                 v => editing.TurnSeconds = TurnTime.FromStep(v), null, 0, TurnTime.Steps, v => TurnTime.Label(TurnTime.FromStep(v)), 150);
             var turnNote = Label("TurnNote", setupCard, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
-            turnNote.text = "人間の手番の持ち時間(20秒〜5分、右端は無制限)。時間が来ると手番終了になります";
+            turnNote.text = "人間の手番の持ち時間。時間が来ると手番終了になります";
             Pin(turnNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(252, y0 - 222), new Vector2(900, 32), pivot: new Vector2(0, 1));
         }
 

@@ -37,7 +37,7 @@ namespace FamiconWars.Game
             title.text = "相性表";
             Pin(title.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(40, -20), new Vector2(300, 56), pivot: new Vector2(0, 1));
             var sub = Label("Sub", card, SizeSmall, Muted, TextAlignmentOptions.MidlineLeft, false);
-            sub.text = "縦: 攻撃する部隊　横: 攻撃を受ける部隊　(10機どうし・地形の守りなし)";
+            sub.text = "縦: 攻撃する部隊　横: 攻撃を受ける部隊";
             Pin(sub.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(220, -34), new Vector2(760, 32), pivot: new Vector2(0, 1));
 
             matchupGrid = new GameObject("Grid", typeof(RectTransform)).GetComponent<RectTransform>();
@@ -112,7 +112,7 @@ namespace FamiconWars.Game
         {
             var img = Panel("Icon_" + d.Id, matchupGrid, Color.white).GetComponent<Image>();
             img.raycastTarget = false; img.preserveAspect = true;
-            var sp = UnitIcons.Get(d.Id, Army.Red);
+            var sp = UnitIcons.Get(d.Icon, Army.Red);
             if (sp != null) img.sprite = sp; else img.color = new Color(1, 1, 1, 0);
             Pin(img.rectTransform, new Vector2(0, 1), new Vector2(0, 1), topCenter, new Vector2(size, size), pivot: new Vector2(0.5f, 1));
         }

@@ -17,6 +17,8 @@ namespace FamiconWars.Game
         /// <summary>Armies that took part, e.g. "1101" (empty: every army of the map).</summary>
         public string seated;
         public bool online;
+        /// <summary>Played with 内政 (records from before it have false and replay with the original rules).</summary>
+        public bool domestic;
         public string[] cmds;
         public int[] seeds;          // uint stored bit for bit (JsonUtility-friendly)
 

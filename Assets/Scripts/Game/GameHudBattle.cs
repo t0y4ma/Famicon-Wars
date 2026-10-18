@@ -151,7 +151,7 @@ namespace FamiconWars.Game
 
         static Sil SilFor(UnitDef d)
         {
-            switch (d.Id)
+            switch (d.Icon)
             {
                 case "INF": return Sil.Soldier;
                 case "MECH": return Sil.Bazooka;
@@ -443,7 +443,7 @@ namespace FamiconWars.Game
         {
             s.Before = Mathf.Clamp(before, 0, 10); s.After = Mathf.Clamp(after, 0, s.Before);
             s.Sil = SilFor(def);
-            s.DefId = def.Id; s.ArmyKind = army;
+            s.DefId = def.Icon; s.ArmyKind = army;
             s.Air = def.Domain == Domain.Air;
             s.Tab.color = ArmyColor(army);
             s.Name.text = name;

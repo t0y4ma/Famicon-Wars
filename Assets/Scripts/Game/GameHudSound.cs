@@ -7,7 +7,7 @@ using UnityEngine.UI;
 namespace FamiconWars.Game
 {
     /// <summary>
-    /// 「設定」: music on/off, the two volumes as sliders, and whether damage is shown as numbers or words. A small window opened from the title
+    /// 「設定」: music on/off, the two volumes as sliders, whether damage is shown as numbers or words, and edge scrolling. A small window opened from the title
     /// screen and the online lobby; the match settings screen uses the same sliders. Changes are heard at
     /// once and saved.
     /// </summary>
@@ -15,7 +15,7 @@ namespace FamiconWars.Game
     {
         RectTransform soundRoot;
         GameSettings soundSettings;
-        Button soundBgmOn, soundBgmOff, numbersOn, numbersOff;
+        Button soundBgmOn, soundBgmOff, numbersOn, numbersOff, edgeOn, edgeOff;
         Slider soundBgmVol, soundSeVol;
         TextMeshProUGUI soundBgmVal, soundSeVal;
 
@@ -89,7 +89,7 @@ namespace FamiconWars.Game
             var card = Panel("Card", soundRoot, Plate);
             card.GetComponent<Image>().raycastTarget = true;
             card.gameObject.AddComponent<ClickSink>();             // clicks on the window do not reach the dimmer
-            Pin(card, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(820, 540));
+            Pin(card, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(820, 640));
             Edge(card, Brass);
             var title = Label("Title", card, SizeTitle, Paper, TextAlignmentOptions.MidlineLeft, true);
             title.text = "設定";
@@ -118,6 +118,13 @@ namespace FamiconWars.Game
             numbersNote.text = "攻撃の見込みと相性表を、数字で出すか言葉で出すか";
             Pin(numbersNote.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -414), new Vector2(540, 28), pivot: new Vector2(0, 1));
 
+            // the board scrolls when the cursor touches a screen edge
+            SoundRowLabel(card, "画面端スクロール", -460);
+            edgeOn = MakeButton("EdgeOn", card, "オン", false, () => SetEdgeScroll(true));
+            Pin((RectTransform)edgeOn.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(240, -460), new Vector2(150, 56), pivot: new Vector2(0, 1));
+            edgeOff = MakeButton("EdgeOff", card, "オフ", false, () => SetEdgeScroll(false));
+            Pin((RectTransform)edgeOff.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(400, -460), new Vector2(150, 56), pivot: new Vector2(0, 1));
+
             var close = MakeButton("Close", card, "閉じる", true, HideSoundPanel);
             Pin((RectTransform)close.transform, new Vector2(1, 0), new Vector2(1, 0), new Vector2(-40, 32), new Vector2(200, 60), pivot: new Vector2(1, 0));
             soundRoot.gameObject.SetActive(false);
@@ -140,6 +147,8 @@ namespace FamiconWars.Game
             SetSlider(soundSeVol, soundSeVal, s.SeVolume);
             StyleButton(numbersOn, s.ShowNumbers);
             StyleButton(numbersOff, !s.ShowNumbers);
+            StyleButton(edgeOn, s.EdgeScroll);
+            StyleButton(edgeOff, !s.EdgeScroll);
             soundRoot.SetAsLastSibling();
             soundRoot.gameObject.SetActive(true);
             SettleButtons(soundRoot);
@@ -170,6 +179,13 @@ namespace FamiconWars.Game
             StyleButton(numbersOn, on);
             StyleButton(numbersOff, !on);
             if (MatchupVisible) RefreshMatchup();
+        }
+
+        void SetEdgeScroll(bool on)
+        {
+            soundSettings.EdgeScroll = on;
+            StyleButton(edgeOn, on);
+            StyleButton(edgeOff, !on);
         }
     }
 

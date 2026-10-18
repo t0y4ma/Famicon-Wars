@@ -795,7 +795,7 @@ namespace FamiconWars.Core
             foreach (var t in aff) { float wv = Weight(t); if (wv > bestAffW) { bestAffW = wv; bestAff = t; } }
             if (bestAff == null || bestAffW < 0.05f) return null;
             int income = 0;
-            for (int i = 0; i < s.Owner.Length; i++) if (s.Owner[i] == Army) income += s.Data.Terrains[s.Terrain[i]].Income;
+            for (int i = 0; i < s.Owner.Length; i++) if (s.Owner[i] == Army) income += RulesEngine.Income(s, i);
             if ((Profile.EcoSave || (Profile.EcoSlotSave && press >= 0.5f)) && ideal != null && ideal.Price > s.Funds[(int)Army] && ideal.Price <= s.Funds[(int)Army] + income * 2
                 && bestAffW < idealW * 0.75f && myCount >= foeCount - 1 && !needInf)
             { savingThisPhase = true; return null; }

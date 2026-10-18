@@ -119,6 +119,25 @@ namespace FamiconWars.Core
         /// <summary>Damage taken multiplier (%) per army; IQ200 COM uses &lt;100.</summary>
         public int[] DamageTakenPct = { 100, 100 };
 
+        // ---- 内政 (only used when Data.Economy is set) ----
+        /// <summary>Facility level per tile (1..Economy.MaxLevel; 0 on tiles that are not facilities).</summary>
+        public int[] Level;
+        /// <summary>Reservation per tile: 0 none, ReserveLevelUp, or ReserveConvertBase + target terrain index. Applied at the owner's next phase.</summary>
+        public int[] Reserve;
+        /// <summary>Funds paid for the reservation on the tile (given back only when its owner takes it back).</summary>
+        public int[] ReservePaid;
+        /// <summary>Per army: the one reservation it may still take back (-1 none). A newer reservation fixes the older ones.</summary>
+        public int[] LastReserve = { -1, -1 };
+        /// <summary>Phase key (Day*Players+army) in which a facility already gave its "ready at once" unit.</summary>
+        public int[] FreeActUsed;
+        /// <summary>The 内政 time after a phase played by a COM: Active is the army that has just finished; only 内政 is allowed.</summary>
+        public bool Interlude;
+        /// <summary>Per army: pressed 「内政終了」 in this 内政 time (shown to everyone; the server ends it).</summary>
+        public bool[] InterludeReady = new bool[2];
+
+        public const int ReserveLevelUp = 1, ReserveConvertBase = 100;
+        public bool Domestic => Data.Economy != null;
+
         public bool IsOut(Army a) => a == Army.None || Out[(int)a];
         public int AliveCount { get { int n = 0; for (int a = 0; a < Players; a++) if (!Out[a]) n++; return n; } }
         /// <summary>The other armies still in the game.</summary>
@@ -130,6 +149,9 @@ namespace FamiconWars.Core
             Funds = new int[players]; ResupplyUsed = new bool[players]; HadUnits = new bool[players]; Out = new bool[players];
             DamageTakenPct = new int[players];
             for (int a = 0; a < players; a++) DamageTakenPct[a] = 100;
+            LastReserve = new int[players];
+            for (int a = 0; a < players; a++) LastReserve[a] = -1;
+            InterludeReady = new bool[players];
         }
 
         public Rules Rules => Data.Rules;
@@ -137,6 +159,9 @@ namespace FamiconWars.Core
         public int Index(int x, int y) => y * Width + x;
         public TerrainDef TerrainAt(int x, int y) => Data.Terrains[Terrain[Index(x, y)]];
         public UnitDef Def(UnitState u) => Data.Units[u.Type];
+        public int LevelAt(int x, int y) => Level[Index(x, y)];
+        /// <summary>Phase key: one number per (day, army).</summary>
+        public int PhaseKey => Day * Players + (int)Active;
         public UnitState UnitById(int id) { foreach (var u in Units) if (u.Id == id) return u; return null; }
 
         /// <summary>The unit standing on a tile (carried units are not on the map).</summary>
@@ -160,6 +185,12 @@ namespace FamiconWars.Core
                 Rng = new Rng(seed)
             };
             for (int i = 0; i < s.CapturingUnit.Length; i++) s.CapturingUnit[i] = -1;
+            s.Level = new int[map.Tiles.Length];
+            for (int i = 0; i < s.Level.Length; i++) s.Level[i] = data.Terrains[s.Terrain[i]].IsProperty ? 1 : 0;
+            s.Reserve = new int[map.Tiles.Length];
+            s.ReservePaid = new int[map.Tiles.Length];
+            s.FreeActUsed = new int[map.Tiles.Length];
+            for (int i = 0; i < s.FreeActUsed.Length; i++) s.FreeActUsed[i] = -1;
             s.SizeFor(Math.Max(2, map.Players));
             for (int a = 0; a < s.Players; a++) s.Funds[a] = data.Rules.StartFunds;
             if (seated != null)
@@ -195,6 +226,12 @@ namespace FamiconWars.Core
             s.HadUnits = (bool[])HadUnits.Clone();
             s.DamageTakenPct = (int[])DamageTakenPct.Clone();
             s.Out = (bool[])Out.Clone();
+            s.Level = (int[])Level.Clone();
+            s.Reserve = (int[])Reserve.Clone();
+            s.ReservePaid = (int[])ReservePaid.Clone();
+            s.LastReserve = (int[])LastReserve.Clone();
+            s.FreeActUsed = (int[])FreeActUsed.Clone();
+            s.InterludeReady = (bool[])InterludeReady.Clone();
             s.Eliminated = new List<Army>(Eliminated);
             s.Units = new List<UnitState>(Units.Count);
             foreach (var u in Units) s.Units.Add(u.Clone());

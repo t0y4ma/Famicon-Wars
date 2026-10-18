@@ -13,7 +13,7 @@ namespace FamiconWars.Game
     /// In a match each army is a human (hot seat) or a COM. Every action, human or COM,
     /// becomes a Command passed to RulesEngine — the same path online play will use.
     /// </summary>
-    public class GameController : MonoBehaviour
+    public partial class GameController : MonoBehaviour
     {
         enum Mode { Screens, Idle, Selected, Menu, Target, Drop, Produce, GameOver }
 
@@ -70,7 +70,8 @@ namespace FamiconWars.Game
 
         void Start()
         {
-            data = GameData.Load(Text("Data/units"), Text("Data/terrains"), Text("Data/damage"), Text("Data/rules"));
+            data = GameData.Load(Text("Data/units"), Text("Data/terrains"), Text("Data/damage"), Text("Data/rules"), Text("Data/economy"), Text("Data/production"));
+            Labels.Register(data);
             if (NetConfig.IsDedicatedServer)
             {
                 // headless server build: no screens, just rooms
@@ -148,6 +149,7 @@ namespace FamiconWars.Game
             hud.OnRoomMap += StepRoomMap;
             hud.OnRoomStart += () => FwClient.RoomAction("start");      // also right after a match (the server drops the finished game)
             hud.OnRoomPublic += on => FwClient.RoomAction("public", on ? 1 : 0);
+            hud.OnRoomDomestic += on => FwClient.RoomAction("domestic", on ? 1 : 0);
             hud.OnOnlineRefresh += RefreshRoomList;
             FwClient.RoomList += OnRoomList;
             hud.OnRoomLeave += () => { if (FwClient.IsConnected) FwClient.LeaveRoom(); roomCode = null; room = null; ShowOnlineLobby(); };
@@ -258,6 +260,7 @@ namespace FamiconWars.Game
 
         void StartMatch()
         {
+            System.Array.Clear(comDomesticKey, 0, comDomesticKey.Length);
             LeaveMatch();
             uint seed = (uint)System.Environment.TickCount;
             // 戦法: as chosen, or random (and then not shown). COM vs COM: a random 戦法 never comes out the same
@@ -463,7 +466,9 @@ namespace FamiconWars.Game
             }
 
             // cursor at a screen edge: scroll (faster when zoomed out)
-            if (inside && Application.isFocused && !hud.BattlePlaying && !rDrag)
+            // not while the page is in the background or the cursor has left it (the last position would stay at the edge),
+            // not under a window over the board, and not when turned off in 設定
+            if (settings.EdgeScroll && inside && Application.isFocused && PagePointer.Inside && !hud.ModalOpen && !hud.BattlePlaying && !rDrag)
             {
                 var dir = Vector2.zero;
                 if (mp.x <= EdgePx) dir.x = -1; else if (mp.x >= Screen.width - EdgePx) dir.x = 1;
@@ -495,8 +500,8 @@ namespace FamiconWars.Game
         }
 
         bool InMatch => state != null && mode != Mode.Screens;
-        bool ComTurn => InMatch && !replaying && !online && !state.GameOver && ai[(int)state.Active] != null;
-        bool HumanTurn => InMatch && !replaying && !state.GameOver && (online ? myArmy >= 0 && (int)state.Active == myArmy && !awaiting && incoming.Count == 0 : ai[(int)state.Active] == null);
+        bool ComTurn => InMatch && !replaying && !online && !state.GameOver && !state.Interlude && ai[(int)state.Active] != null;
+        bool HumanTurn => InMatch && !replaying && !state.GameOver && !state.Interlude && (online ? myArmy >= 0 && (int)state.Active == myArmy && !awaiting && incoming.Count == 0 : ai[(int)state.Active] == null);
 
         string ControllerName(Army a) => replaying ? ReplayName(a) : online ? ((int)a == myArmy ? "あなた" : (room.HasValue && room.Value.seatNames != null && !string.IsNullOrEmpty(room.Value.seatNames[(int)a]) ? room.Value.seatNames[(int)a] : "相手") + StyleTag(botCopies[(int)a]))
             : ai[(int)a] == null ? "人間" : ComName(ai[(int)a]);
@@ -515,7 +520,7 @@ namespace FamiconWars.Game
         int Income(Army a)
         {
             int sum = 0;
-            for (int i = 0; i < state.Owner.Length; i++) if (state.Owner[i] == a) sum += data.Terrains[state.Terrain[i]].Income;
+            for (int i = 0; i < state.Owner.Length; i++) if (state.Owner[i] == a) sum += RulesEngine.Income(state, i);
             return sum;
         }
 
@@ -580,6 +585,9 @@ namespace FamiconWars.Game
                     case ResuppliedEvent _: GameAudio.Se("resupply"); break;
                     case PhaseStartEvent _: GameAudio.Se("phase_start", 0.8f, 0); break;
                     case EliminatedEvent _: GameAudio.Se("capture_done", 1f, 0); break;
+                    case ReservedEvent _: GameAudio.Se("capture_step", 0.8f, 0); break;
+                    case ReserveLostEvent _: GameAudio.Se("ui_error", 0.8f, 0); break;
+                    case LevelChangedEvent _: GameAudio.Se("capture_done", 0.8f, 0); break;
                     case UnitLostEvent l when l.Reason != "撃破" && l.Reason != "敗退": GameAudio.Se("explode", 0.6f); break;
                 }
             }
@@ -665,8 +673,9 @@ namespace FamiconWars.Game
             if (kb != null && kb.spaceKey.wasPressedThisFrame && ComTurn)
             {
                 paused = !paused;
-                hud.Hint(paused ? "一時停止中(Spaceで再開)" : null);
+                hud.Hint(paused ? "一時停止中" : null);
             }
+            ComDomestic();
             if (ComTurn && !aiRunning) StartCoroutine(RunCom());
             UpdateTurnTimer();
 
@@ -676,7 +685,14 @@ namespace FamiconWars.Game
             hoverX = Mathf.RoundToInt(world.x); hoverY = Mathf.RoundToInt(-world.y);
             bool overUi = hud.PointerOverUi;
             if (!overUi) hud.ShowInfo(state, hoverX, hoverY, ForecastText());
-            if (!HumanTurn) return;   // the COM drives the cursor during its phase
+            UpdateInterlude();
+            if (!HumanTurn)
+            {
+                // 内政 is open while another army plays (and in the 内政 time): a click on one of our facilities
+                if (hud.DomesticVisible && ((mouse.rightButton.wasReleasedThisFrame && !rDragMoved) || (kb != null && kb.escapeKey.wasPressedThisFrame))) hud.HideDomestic();
+                if (mouse.leftButton.wasPressedThisFrame && !overUi && state.InBounds(hoverX, hoverY)) { if (!OpenDomestic(hoverX, hoverY)) hud.HideDomestic(); }
+                return;   // the COM drives the cursor during its phase
+            }
 
             board.SetCursor(hoverX, hoverY, !overUi && mode != Mode.GameOver && mode != Mode.Produce);
             UpdateRangePreview(overUi);
@@ -702,6 +718,7 @@ namespace FamiconWars.Game
                 float d = GameSettings.SpeedDelay[Speed];
 
                 if (d > 0) yield return ShowIntent(cmd, d);
+                if (cmd is EndPhaseCommand ep && WantsInterlude()) ep.Interlude = true;
 
                 var cast = BattleCast(cmd);
                 var r = ApplyRecorded(cmd);
@@ -827,6 +844,9 @@ namespace FamiconWars.Game
                     var u = state.UnitAt(x, y);
                     if (u != null && u.Army == state.Active && !u.Acted) { Select(u); return; }
                     if (u == null && RulesEngine.ProducibleAt(state, state.Active, x, y).Count > 0) { OpenProduce(x, y); return; }
+                    // another person at this screen (or online: never) may do 内政 on their own facility during this phase
+                    if (OpenDomestic(x, y)) return;
+                    hud.HideDomestic();
                     break;
                 }
                 case Mode.Selected:
@@ -874,7 +894,7 @@ namespace FamiconWars.Game
             board.Highlight(AttackPreview(u), new Color(1f, 0.25f, 0.2f, 0.45f));
             var joins = reach.Cost.Keys.Where(i => Movement.StopAt(state, u, i % state.Width, i / state.Width) == StopKind.Join).ToList();
             board.Highlight(joins, new Color(0.2f, 1f, 0.35f, 0.85f));
-            hud.Hint(joins.Count > 0 ? "移動先をクリック(緑=合流 / 右クリックで取り消し)" : "移動先をクリック(右クリックで取り消し)");
+            hud.Hint("移動先をクリック");
         }
 
         int rangeFrom = -1;
@@ -967,7 +987,7 @@ namespace FamiconWars.Game
             hud.HideActionMenu();
             board.ClearHighlights();
             board.Highlight(targets.Select(t => state.Index(t.X, t.Y)), new Color(1f, 0.25f, 0.2f, 0.55f));
-            hud.Hint("攻撃する相手を選択(右クリックで戻る)");
+            hud.Hint("攻撃する相手を選択");
         }
 
         void EnterDrop(int cargoId, List<int> tiles)
@@ -977,7 +997,7 @@ namespace FamiconWars.Game
             hud.HideActionMenu();
             board.ClearHighlights();
             board.Highlight(tiles, new Color(0.3f, 1f, 0.5f, 0.5f));
-            hud.Hint("降ろすマスを選択(右クリックで戻る)");
+            hud.Hint("降ろすマスを選択");
         }
 
         void OpenProduce(int x, int y)
@@ -986,10 +1006,15 @@ namespace FamiconWars.Game
             produceX = x; produceY = y;
             mode = Mode.Produce;
             var list = RulesEngine.ProducibleAt(state, state.Active, x, y);
-            hud.ShowProduce(Labels.Get(state.TerrainAt(x, y).NameKey), state.Funds[(int)state.Active], list, d =>
+            // 内政: what a higher level of this facility would make
+            var locked = state.Domestic
+                ? RulesEngine.ProductionTable(state, x, y).Where(p => p.need > state.LevelAt(x, y)).OrderBy(p => p.need).ThenBy(p => p.def.Price).ToList()
+                : null;
+            string name = Labels.Get(state.TerrainAt(x, y).NameKey) + (state.Domestic ? " Lv" + state.LevelAt(x, y) : "");
+            hud.ShowProduce(name, state.Funds[(int)state.Active], list, d =>
             {
                 if (Try(new ProduceCommand { Army = state.Active, X = produceX, Y = produceY, UnitType = d.Id })) Cancel();
-            }, state.Active);
+            }, state.Active, locked);
         }
 
         void Cancel()
@@ -1009,6 +1034,7 @@ namespace FamiconWars.Game
             board.Refresh();
             hud.HideActionMenu();
             hud.HideProduce();
+            hud.HideDomestic();
             hud.Hint(null);
         }
 
@@ -1079,6 +1105,20 @@ namespace FamiconWars.Game
                     case UnitLostEvent l when l.Reason != "撃破" && l.Reason != "敗退":
                         lines.Add("部隊が" + l.Reason + "しました");
                         break;
+                    case ReservedEvent rv:
+                        lines.Add(Labels.Army(rv.Army) + (rv.Cancelled ? "が予約を取り消しました(" : "が予約: ") + FacilityAt(rv.X, rv.Y) + " " + ReserveText(rv.Kind, rv.X, rv.Y)
+                            + (rv.Cancelled ? "、" + rv.Cost.ToString("N0") + " 返金)" : "(" + rv.Cost.ToString("N0") + ")"));
+                        break;
+                    case ReserveLostEvent rl:
+                        lines.Add(Labels.Army(rl.Army) + "の予約が占領で取り消されました: " + FacilityAt(rl.X, rl.Y));
+                        break;
+                    case LevelChangedEvent lc:
+                        lines.Add(lc.Converted != null ? Labels.Army(lc.Army) + ": 都市を" + Labels.Get(data.Terrain(lc.Converted).NameKey) + "に転向しました(Lv" + lc.Level + ")"
+                            : Labels.Army(lc.Army) + ": " + FacilityAt(lc.X, lc.Y) + "がレベル" + lc.Level + "になりました");
+                        break;
+                    case InterludeEvent ie when ie.Started:
+                        lines.Add("内政の時間です");
+                        break;
                     case GameOverEvent g when replaying:
                         lines.Add((g.Winner == Army.None ? "引き分け" : Labels.Army(g.Winner) + "の勝ち") + "(" + g.Reason + ")");
                         break;
@@ -1093,6 +1133,7 @@ namespace FamiconWars.Game
             }
             if (lines.Count > 0) hud.Toast(string.Join("\n", lines));
             PlayEventSounds(r, cutIn);
+            RefreshDomestic();
             return cutIn;
         }
 
@@ -1139,7 +1180,8 @@ namespace FamiconWars.Game
             {
                 var e = MapCatalog.Find(m.mapIds[i]);
                 list.Add(new RoomListEntry { Code = m.codes[i], MapName = e != null ? e.Name : m.mapIds[i], Host = m.hostNames[i], State = m.states[i], Members = m.members[i], SeatsTaken = m.seatsTaken[i],
-                    SeatCount = m.seatCounts != null && m.seatCounts.Length > i ? m.seatCounts[i] : 2 });
+                    SeatCount = m.seatCounts != null && m.seatCounts.Length > i ? m.seatCounts[i] : 2,
+                    Domestic = m.domestic != null && m.domestic.Length > i && m.domestic[i] });
             }
             hud.SetRoomList(list);
         }
@@ -1253,14 +1295,14 @@ namespace FamiconWars.Game
             {
                 if (s == myArmy || state.Out[s] || (SeatKind)m.seatKinds[s] != SeatKind.Human || m.seatOnline[s]) continue;
                 bool proxy = m.seatProxy != null && m.seatProxy.Length > s && m.seatProxy[s];
-                parts.Add(Labels.Army((Army)s) + (proxy ? "(COMが代わりに打っています)" : "(戻るのを待っています。しばらくするとCOMが代わりに打ちます)"));
+                parts.Add(Labels.Army((Army)s) + (proxy ? ": COMが代打ち中" : ": 戻るのを待っています"));
             }
             return parts.Count == 0 ? null : "接続が切れました: " + string.Join("、", parts);
         }
 
         RoomView ToView(RoomStatusMsg m)
         {
-            var v = new RoomView { Code = m.code, MapId = m.mapId, Started = m.started, GameOver = m.gameOver, IAmHost = m.myId == m.hostId, MySeat = m.mySeat, IsPublic = m.isPublic,
+            var v = new RoomView { Code = m.code, MapId = m.mapId, Started = m.started, GameOver = m.gameOver, IAmHost = m.myId == m.hostId, MySeat = m.mySeat, IsPublic = m.isPublic, Domestic = m.domestic,
                 SeatCount = Mathf.Clamp(m.seatCount, 2, Armies.Max), TurnSeconds = m.turnSeconds };
             for (int s = 0; s < Armies.Max; s++)
             {
@@ -1327,7 +1369,7 @@ namespace FamiconWars.Game
             onlineBot = onlineBotLevel > 0 && myArmy >= 0 ? new AiPlayer((Army)myArmy, AiProfile.ForLevel(onlineBotLevel), (uint)System.Environment.TickCount) : null;
             var map = MapDef.Parse(Text("Maps/" + m.mapId), data);
             replica = new OnlineReplica();
-            replica.Rebuild(data, map, m.cmds ?? new string[0], m.seeds ?? new uint[0], m.seated);
+            replica.Rebuild(data, map, m.cmds ?? new string[0], m.seeds ?? new uint[0], m.seated, m.domestic);
             state = replica.State;
             onlineSeated = m.seated;
             onlineTurnSeconds = m.turnSeconds;
@@ -1361,7 +1403,17 @@ namespace FamiconWars.Game
         bool botCheckFailed;                               // a mismatch was reported: stop checking
 
         bool BotsOnServer => room.HasValue && room.Value.botsOnServer;
-        static bool IsBotMove(Command c) => !(c is SurrenderCommand) && !(c is AbortCommand);
+        /// <summary>Moves a BOT itself makes (not giving up, the end of a match, or 内政 — people's commands that may come in its phase).</summary>
+        static bool IsBotMove(Command c) => !(c is SurrenderCommand) && !(c is AbortCommand) && !(c is LevelUpCommand) && !(c is ConvertCommand)
+            && !(c is CancelReserveCommand) && !(c is InterludeDoneCommand) && !(c is EndInterludeCommand);
+
+        /// <summary>A BOT move compared without the 内政-time mark the server adds to its end of phase.</summary>
+        static string BotKey(string text)
+        {
+            var c = CommandCodec.Decode(text);
+            if (c is EndPhaseCommand e) { e.Interlude = false; return CommandCodec.Encode(e); }
+            return text;
+        }
 
         /// <summary>The BOT's next move on this state, skipping moves the rules refuse (the same on every client).</summary>
         static Command BotNext(AiPlayer ai, GameState s)
@@ -1394,7 +1446,7 @@ namespace FamiconWars.Game
             for (int i = cmds.Length - 1; i >= 0; i--) if (cmds[i].StartsWith("E,")) { start = i + 1; break; }
             var seeds = m.seeds ?? new uint[0];
             var temp = new OnlineReplica();
-            temp.Rebuild(data, map, cmds.Take(start).ToArray(), seeds.Take(start).ToArray(), m.seated);
+            temp.Rebuild(data, map, cmds.Take(start).ToArray(), seeds.Take(start).ToArray(), m.seated, m.domestic);
             for (int i = start; i < cmds.Length; i++)
             {
                 var c = CommandCodec.Decode(cmds[i]);
@@ -1407,7 +1459,7 @@ namespace FamiconWars.Game
         void PlayHostBot()
         {
             if (BotsOnServer) { botSent = null; return; }
-            if (replica == null || replaying || !InMatch || state.GameOver || !IAmHost || botSent != null) return;
+            if (replica == null || replaying || !InMatch || state.GameOver || state.Interlude || !IAmHost || botSent != null) return;
             if (incoming.Count > 0 || hud.BattlePlaying || hud.BannerShowing || Time.unscaledTime < botSendAt) return;
             var copy = botCopies[(int)state.Active];
             if (copy == null) return;
@@ -1424,9 +1476,9 @@ namespace FamiconWars.Game
             if (cmd == null || !IsBotMove(cmd) || BotsOnServer || botCheckFailed) return;
             var copy = botCopies[(int)cmd.Army];
             if (copy == null) return;
-            if (botSent != null && botSent == m.cmd) { botSent = null; return; }     // the move this client sent
+            if (botSent != null && BotKey(botSent) == BotKey(m.cmd)) { botSent = null; return; }     // the move this client sent
             var expect = BotNext(copy, replica.State);
-            if (expect == null || CommandCodec.Encode(expect) != m.cmd)
+            if (expect == null || BotKey(CommandCodec.Encode(expect)) != BotKey(m.cmd))
             {
                 botCheckFailed = true;
                 FwClient.ReportBotMismatch(m.index);
@@ -1550,7 +1602,7 @@ namespace FamiconWars.Game
             var rec = new MatchRecord
             {
                 mapId = recMapId, date = System.DateTime.Now.ToString("yyyy/MM/dd HH:mm"),
-                red = RecordName(Army.Red), blue = RecordName(Army.Blue), online = online,
+                red = RecordName(Army.Red), blue = RecordName(Army.Blue), online = online, domestic = state.Domestic,
                 names = Enumerable.Range(0, state.Players).Select(a => RecordName((Army)a)).ToArray(),
                 seated = online ? onlineSeated ?? "" : recSeated != null ? string.Concat(recSeated.Select(b => b ? "1" : "0")) : "",
                 result = (winner == Army.None ? "引き分け" : Labels.Army(winner) + "の勝ち") + "(" + reason + ")",
@@ -1590,9 +1642,11 @@ namespace FamiconWars.Game
         void ReplayGoto(int n)
         {
             n = Mathf.Clamp(n, 0, replayRec.cmds.Length);
-            var map = MapDef.Parse(Text("Maps/" + replayRec.mapId), data);
+            // a match from before 内政 replays with the rules it was played with
+            var rules = replayRec.domestic ? data : data.WithEconomy(null);
+            var map = MapDef.Parse(Text("Maps/" + replayRec.mapId), rules);
             bool[] seatedRec = string.IsNullOrEmpty(replayRec.seated) ? null : replayRec.seated.Select(ch => ch == '1').ToArray();
-            state = GameState.Create(data, map, 1, seatedRec);
+            state = GameState.Create(rules, map, 1, seatedRec);
             RulesEngine.StartGame(state);
             for (int i = 0; i < n; i++)
             {
@@ -1691,6 +1745,11 @@ namespace FamiconWars.Game
                 case ResupplyAllCommand _: return side + "全補";
                 case SurrenderCommand _: return side + "降伏";
                 case AbortCommand _: return "対戦を途中で終了";
+                case LevelUpCommand l: return side + FacilityAt(l.X, l.Y) + " のレベルアップを予約";
+                case ConvertCommand v: return side + "都市を" + Labels.Get(data.Terrain(v.Target).NameKey) + "に転向する予約";
+                case CancelReserveCommand _: return side + "予約の取り消し";
+                case InterludeDoneCommand _: return side + "内政終了";
+                case EndInterludeCommand _: return "内政の時間の終わり";
             }
             return side;
         }

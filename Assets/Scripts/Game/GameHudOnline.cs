@@ -12,7 +12,7 @@ namespace FamiconWars.Game
     public sealed class RoomView
     {
         public string Code, MapId;
-        public bool Started, GameOver, IAmHost, IsPublic;
+        public bool Started, GameOver, IAmHost, IsPublic, Domestic;
         /// <summary>Seats, map and BOTs can change: before a match or once it is over.</summary>
         public bool Editable => !Started || GameOver;
         public int MySeat;                        // army of my seat, -1 watching
@@ -33,6 +33,7 @@ namespace FamiconWars.Game
     {
         public string Code, MapName, Host;
         public int State, Members, SeatsTaken, SeatCount;
+        public bool Domestic;
     }
 
     /// <summary>
@@ -46,6 +47,7 @@ namespace FamiconWars.Game
         public event Action<string, string> OnOnlineJoin;    // address, code
         public event Action OnOnlineBack, OnOnlineRefresh, OnSpectatorBack, OnRoomWatch;
         public event Action<bool> OnRoomPublic;
+        public event Action<bool> OnRoomDomestic;
         public event Action<int> OnRoomSit, OnRoomHost, OnRoomMap;   // seat / member id / map step (-1, +1)
         public event Action<int, int> OnRoomBot;             // seat, level 0-4
         public event Action<int, int> OnRoomBotStyle;        // seat, 戦法 0 random / 1-3
@@ -56,7 +58,7 @@ namespace FamiconWars.Game
         RectTransform onlineRoot, onlineForm, roomRoot, roomBody;
         TMP_InputField addressInput, codeInput, nameInput;
         TextMeshProUGUI onlineStatus, roomStatus;
-        Button onlineCreate, onlineJoin, createPublicBtn, createPrivateBtn, roomPublicBtn;
+        Button onlineCreate, onlineJoin, createPublicBtn, createPrivateBtn, roomPublicBtn, roomDomesticBtn;
         bool createPublic = true;
         RectTransform listPanel, listRows;
         TextMeshProUGUI listMessage;
@@ -73,7 +75,7 @@ namespace FamiconWars.Game
             title.text = "オンライン対戦";
             Pin(title.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(96, -48), new Vector2(600, 60), pivot: new Vector2(0, 1));
             var sub = Label("Sub", onlineRoot, SizeBody, Muted, TextAlignmentOptions.MidlineLeft, false);
-            sub.text = "部屋を作って番号を相手に伝えるか、もらった番号で部屋に入ります(対戦中の部屋に入ると観戦になります)";
+            sub.text = "部屋を作って番号を相手に伝えるか、もらった番号で部屋に入ります";
             Pin(sub.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(96, -108), new Vector2(1500, 36), pivot: new Vector2(0, 1));
 
             // ---- form ----
@@ -248,7 +250,7 @@ namespace FamiconWars.Game
                 Pin(name.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(124, -5), new Vector2(480, 26), pivot: new Vector2(0, 1));
                 var info = Label("Info", row, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
                 info.richText = true;
-                info.text = ListStates[Mathf.Clamp(e.State, 0, 2)] + "　席 " + e.SeatsTaken + "/" + Mathf.Max(2, e.SeatCount) + "　" + e.Members + "人　部屋主 " + e.Host;
+                info.text = ListStates[Mathf.Clamp(e.State, 0, 2)] + "　席 " + e.SeatsTaken + "/" + Mathf.Max(2, e.SeatCount) + "　" + (e.Domestic ? "内政あり" : "内政なし") + "　" + e.Members + "人　部屋主 " + e.Host;
                 Pin(info.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(124, -30), new Vector2(480, 26), pivot: new Vector2(0, 1));
                 string c = e.Code;
                 bool watch = e.State == 1;
@@ -372,9 +374,13 @@ namespace FamiconWars.Game
             roomCodeLabel.characterSpacing = 12; roomCodeLabel.overflowMode = TextOverflowModes.Overflow;
             Pin(roomCodeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(210, -28), new Vector2(320, 84), pivot: new Vector2(0, 1));
             roomInvite = Label("Invite", roomBody, SizeBody, Muted, TextAlignmentOptions.MidlineLeft, false);
-            Pin(roomInvite.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(520, -48), new Vector2(860, 44), pivot: new Vector2(0, 1));
+            roomInvite.textWrappingMode = TextWrappingModes.Normal;
+            Pin(roomInvite.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(520, -36), new Vector2(630, 68), pivot: new Vector2(0, 1));
             roomPublicBtn = MakeButton("Visibility", roomBody, "公開", false, () => OnRoomPublic?.Invoke(lastRoomView == null || !lastRoomView.IsPublic));
             Pin((RectTransform)roomPublicBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-96, -44), new Vector2(400, 52), pivot: new Vector2(1, 1));
+            // 内政 (facility levels) on or off for the next match: host only
+            roomDomesticBtn = MakeButton("Domestic", roomBody, "内政あり", false, () => OnRoomDomestic?.Invoke(lastRoomView == null || !lastRoomView.Domestic));
+            Pin((RectTransform)roomDomesticBtn.transform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-504, -44), new Vector2(240, 52), pivot: new Vector2(1, 1));
 
             // map
             var mapPlate = Panel("Map", roomBody, Plate);
@@ -406,7 +412,7 @@ namespace FamiconWars.Game
             Pin(turnPlate, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-96, -650), new Vector2(560, 150), pivot: new Vector2(1, 1));
             Edge(turnPlate, PlateEdge);
             var turnLabel = Label("Label", turnPlate, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
-            turnLabel.text = "制限時間(1手番)";
+            turnLabel.text = "制限時間";
             Pin(turnLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -16), new Vector2(400, 28), pivot: new Vector2(0, 1));
             roomTurn = MakeSlider("TurnSlider", turnPlate, new Vector2(12, -56), 536, out roomTurnVal,
                 v => { }, () => OnRoomTurnTime?.Invoke(TurnTime.FromStep(Mathf.RoundToInt(roomTurn.value))),
@@ -435,7 +441,7 @@ namespace FamiconWars.Game
             var nameLabel = Label("Label", namePlate, SizeSmall, Muted, TextAlignmentOptions.TopLeft, false);
             nameLabel.text = "自分の表示名";
             Pin(nameLabel.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -16), new Vector2(300, 28), pivot: new Vector2(0, 1));
-            roomNameInput = MakeInput("NameInput", namePlate, "表示名(12文字まで)", TMP_InputField.ContentType.Standard);
+            roomNameInput = MakeInput("NameInput", namePlate, "表示名", TMP_InputField.ContentType.Standard);
             roomNameInput.characterLimit = 12;
             Pin((RectTransform)roomNameInput.transform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -56), new Vector2(340, 56), pivot: new Vector2(0, 1));
             roomNameApply = MakeButton("NameApply", namePlate, "変更", true, () =>
@@ -527,7 +533,7 @@ namespace FamiconWars.Game
             tab.GetComponent<Image>().raycastTarget = false;
             Pin(tab, new Vector2(0, 1), new Vector2(1, 1), Vector2.zero, new Vector2(0, 8), pivot: new Vector2(0.5f, 1), stretchX: true);
             var head = Label("Army", card, SizeBody, ArmyTextColor(army), TextAlignmentOptions.TopLeft, true);
-            head.text = Labels.Army(army) + (s == 0 ? "(先手)" : "(後手)");
+            head.text = Labels.Army(army) + "";
             Pin(head.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(24, -24), new Vector2(-48, 34), pivot: new Vector2(0.5f, 1), stretchX: true);
             p.Icon = Panel("Icon", card, Color.white).GetComponent<Image>();
             p.Icon.raycastTarget = false; p.Icon.preserveAspect = true;
@@ -562,8 +568,11 @@ namespace FamiconWars.Game
 
             SetText(roomCodeLabel, v.Code);
             SetText(roomInvite, v.Started ? (v.GameOver ? "対戦は終わりました。席とマップを決め直して次の対戦ができます" : "対戦中です。この番号で入ると観戦できます") : "この番号を伝えると、相手や観戦者が入れます");
-            SetText(roomPublicBtn.GetComponentInChildren<TextMeshProUGUI>(), (v.IsPublic ? "公開中(一覧に表示)" : "非公開(番号を知る人だけ)") + (v.IAmHost ? "  切替" : ""));
+            SetText(roomPublicBtn.GetComponentInChildren<TextMeshProUGUI>(), (v.IsPublic ? "公開中" : "非公開") + (v.IAmHost ? "  切替" : ""));
             if (roomPublicBtn.interactable != v.IAmHost) roomPublicBtn.interactable = v.IAmHost;
+            SetText(roomDomesticBtn.GetComponentInChildren<TextMeshProUGUI>(), (v.Domestic ? "内政あり" : "内政なし") + (v.IAmHost && v.Editable ? "  切替" : ""));
+            bool canDomestic = v.IAmHost && v.Editable;
+            if (roomDomesticBtn.interactable != canDomestic) roomDomesticBtn.interactable = canDomestic;
 
             // map
             var entry = MapCatalog.Find(v.MapId);
@@ -627,7 +636,7 @@ namespace FamiconWars.Game
             SetActive(roomWatch, watch);
             if (watch) SetText(roomWatch.GetComponentInChildren<TextMeshProUGUI>(), v.MySeat >= 0 ? "対戦に戻る" : "観戦に戻る");
             SetText(roomHint, canStart ? (ready ? (v.SeatCount > 2 && v.FilledSeats < v.SeatCount ? "空いた席の軍は参加しません" : "")
-                    : v.SeatCount == 2 ? "両方の席が埋まると開始できます(空席には BOT も置けます)" : "2つ以上の席が埋まると開始できます(空席には BOT も置けます)")
+                    : v.SeatCount == 2 ? "両方の席が埋まると開始できます" : "2つ以上の席が埋まると開始できます")
                 : v.Editable ? "部屋主が対戦を始めるのを待っています" : "");
 
             UpdateBotMenu(v);

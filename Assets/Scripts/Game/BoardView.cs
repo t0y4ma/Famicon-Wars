@@ -29,6 +29,9 @@ namespace FamiconWars.Game
         Sprite ringSprite, produceSprite;
         TextMesh[] captureTexts;
         SpriteRenderer[] captureBacks;
+        // 内政: the level (shown from 2 up) and a reservation waiting for its owner's next phase
+        TextMesh[] levelTexts, reserveTexts;
+        SpriteRenderer[] levelBacks, reserveBacks;
         readonly Dictionary<int, UnitView> unitViews = new Dictionary<int, UnitView>();
         Transform unitRoot;
         SpriteRenderer cursor;
@@ -62,6 +65,8 @@ namespace FamiconWars.Game
             produceSprite = ProduceSprite();
             captureTexts = new TextMesh[n];
             captureBacks = new SpriteRenderer[n];
+            levelTexts = new TextMesh[n]; reserveTexts = new TextMesh[n];
+            levelBacks = new SpriteRenderer[n]; reserveBacks = new SpriteRenderer[n];
             pictured = new bool[n];
             for (int y = 0; y < s.Height; y++)
                 for (int x = 0; x < s.Width; x++)
@@ -103,6 +108,17 @@ namespace FamiconWars.Game
                     highlights[i] = MakeSprite("Hi", tile.transform, Vector3.zero, 1f, Color.clear, 2);
                     rangeMarks[i] = MakeSprite("Range", tile.transform, new Vector3(0, 0, -0.01f), 1f, new Color(1f, 0.55f, 0.15f, 0.95f), 2, ringSprite);
                     rangeMarks[i].enabled = false;
+                    if (t.IsProperty && s.Domestic)
+                    {
+                        levelBacks[i] = MakeSprite("LvBack", tile.transform, new Vector3(-0.31f, 0.37f, -0.02f), 0.3f, BadgeBack, 8, badge);
+                        levelBacks[i].transform.localScale = new Vector3(0.36f, 0.22f, 1);
+                        levelTexts[i] = MakeText("Lv", tile.transform, new Vector3(-0.31f, 0.375f, -0.02f), "", 0.042f, new Color(1f, 0.86f, 0.45f), 9);
+                        levelTexts[i].fontStyle = FontStyle.Bold;
+                        reserveBacks[i] = MakeSprite("RsvBack", tile.transform, new Vector3(0.3f, 0.36f, -0.02f), 0.3f, BadgeBack, 8, badge);
+                        reserveBacks[i].transform.localScale = new Vector3(0.3f, 0.3f, 1);
+                        reserveTexts[i] = MakeText("Rsv", tile.transform, new Vector3(0.3f, 0.37f, -0.02f), "", 0.055f, Color.white, 9);
+                        reserveTexts[i].fontStyle = FontStyle.Bold;
+                    }
                     if (t.IsProperty && t.Produces != null)
                     {
                         produceMarks[i] = MakeSprite("Produce", tile.transform, new Vector3(-0.32f, -0.32f, 0), 0.3f, Color.white, 3, produceSprite);
@@ -129,6 +145,17 @@ namespace FamiconWars.Game
                 if (captureBacks[i] != null) captureBacks[i].enabled = captureTexts[i].text.Length > 0;
                 if (produceMarks[i] != null)
                     produceMarks[i].enabled = o != Army.None && RulesEngine.InProductionRange(state, o, i % state.Width, i / state.Width);
+                if (levelTexts[i] != null)
+                {
+                    int lv = state.Level[i];
+                    levelTexts[i].text = Roman(lv);
+                    levelBacks[i].enabled = lv >= 1;
+                    int rk = state.Reserve[i];
+                    // ▲ level up, ► conversion; in the owner's colour, blinking (Update)
+                    reserveTexts[i].text = rk == 0 ? "" : rk == GameState.ReserveLevelUp ? "▲" : "►";
+                    reserveTexts[i].color = o == Army.None ? Color.white : ArmyStyle.Text(o);
+                    reserveBacks[i].enabled = rk != 0;
+                }
             }
             var alive = new HashSet<int>();
             foreach (var u in state.Units)
@@ -152,7 +179,7 @@ namespace FamiconWars.Game
                 UnitState cargo = u.Cargo.Count > 0 ? state.UnitById(u.Cargo[0]) : null;
                 v.CargoBack.enabled = cargo != null;
                 v.CargoIcon.enabled = cargo != null;
-                if (cargo != null) v.CargoIcon.sprite = UnitIcons.Get(state.Def(cargo).Id, cargo.Army);
+                if (cargo != null) v.CargoIcon.sprite = UnitIcons.Get(state.Def(cargo).Icon, cargo.Army);
 
                 bool lowFuel = d.Fuel > 0 && u.Fuel <= Mathf.Max(1, d.Fuel / 4) && (d.FuelPerPhase > 0 || d.Domain == Domain.Sea || u.Fuel <= d.Move);
                 bool noAmmo = d.Ammo > 0 && u.Ammo == 0;
@@ -168,6 +195,16 @@ namespace FamiconWars.Game
         {
             if (state == null) return;
             float t = Time.time;
+            if (reserveTexts != null && state.Domestic)
+            {
+                float a = 0.55f + 0.45f * Mathf.Abs(Mathf.Sin(t * 3f));
+                for (int i = 0; i < reserveTexts.Length; i++)
+                {
+                    var rt = reserveTexts[i];
+                    if (rt == null || rt.text.Length == 0) continue;
+                    var c = rt.color; c.a = a; rt.color = c;
+                }
+            }
             foreach (var kv in unitViews)
             {
                 var v = kv.Value;
@@ -176,6 +213,14 @@ namespace FamiconWars.Game
                 rest.y = v.BaseY + Mathf.Abs(Mathf.Sin(t * 3.2f + v.Phase)) * 0.045f;
                 v.Icon.transform.localPosition = rest;
             }
+        }
+
+        /// <summary>Facility level as a Roman numeral (I, II, III, IV …).</summary>
+        public static string Roman(int n)
+        {
+            if (n <= 0) return "";
+            string[] r = { "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X" };
+            return n < r.Length ? r[n] : n.ToString();
         }
 
         static Vector3 IconRest(UnitDef d) => new Vector3(0, d.Domain == Domain.Air ? 0.12f : 0.04f, 0);
@@ -210,7 +255,7 @@ namespace FamiconWars.Game
             v.Shadow.transform.localScale = new Vector3(air ? 0.55f : 0.78f, air ? 0.16f : 0.22f, 1);
 
             v.BaseY = IconRest(d).y;
-            var sp = UnitIcons.Get(d.Id, u.Army);
+            var sp = UnitIcons.Get(d.Icon, u.Army);
             v.Icon = MakeSprite("Icon", v.Root.transform, IconRest(d), 1f, Color.white, 4, sp ?? square);
             v.Icon.flipX = ArmyStyle.FacesLeft(u.Army);     // armies face each other
             if (sp == null)

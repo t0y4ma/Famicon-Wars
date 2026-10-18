@@ -41,6 +41,7 @@ namespace FamiconWars.Core
         public bool BotsOnServer;                    // the server plays the BOT seats (else the host does)
         public int SeatCount = 2;                    // armies of the room's map
         public int TurnSeconds;                      // time for a person's phase (0 = no limit)
+        public bool Domestic = true;                 // the next match is played with 内政
         public SeatKind[] SeatKinds = new SeatKind[Armies.Max];
         public string[] SeatNames = new string[Armies.Max];
         public int[] SeatLevels = new int[Armies.Max];        // BOT strength 1-4
@@ -59,6 +60,8 @@ namespace FamiconWars.Core
         /// <summary>Armies that play ("1101": the third seat was left empty); empty = every army of the map.</summary>
         public string Seated = "";
         public int TurnSeconds;
+        /// <summary>This match is played with 内政 (facility levels and reservations).</summary>
+        public bool Domestic = true;
         /// <summary>Seconds already used in the current phase (a returning player's clock).</summary>
         public float PhaseElapsed;
     }
@@ -71,6 +74,7 @@ namespace FamiconWars.Core
     {
         public string[] Codes, MapIds, HostNames;
         public int[] States, Members, SeatsTaken, SeatCounts;
+        public bool[] Domestic;
     }
 
     public sealed class RoomMember
@@ -98,6 +102,8 @@ namespace FamiconWars.Core
         public int SeatCount = 2;
         /// <summary>Time for a person's phase in seconds (0 = no limit), set by the host.</summary>
         public int TurnSeconds;
+        /// <summary>内政 for the next match (host's choice) / for the match being played.</summary>
+        public bool Domestic = true, MatchDomestic = true;
         public readonly SeatKind[] Seats = new SeatKind[Armies.Max];
         public readonly int[] BotLevels = new int[Armies.Max];
         public readonly int[] BotStyles = new int[Armies.Max];         // 0 random, 1-3 AiStyle
@@ -108,6 +114,10 @@ namespace FamiconWars.Core
         public readonly bool[] MatchSeated = new bool[Armies.Max];
         /// <summary>When the current phase began, and which phase that is (day * armies + army).</summary>
         public double PhaseStart; public int PhaseKey = -1;
+        /// <summary>When the current 内政 time (after a BOT's / stand-in's phase) began.</summary>
+        public double InterludeStart;
+        /// <summary>Per seat: the 内政 window (phase, 内政 time) in which a BOT / stand-in already did its 内政.</summary>
+        public readonly int[] DomesticKey = { -1, -1, -1, -1, -1, -1, -1, -1 };
         public int HostId = -1, NextMemberId = 1;
         public double BotNextTime;
         public int Speed = 1;
@@ -189,7 +199,7 @@ namespace FamiconWars.Core
             });
             if (list.Count > MaxListed) list.RemoveRange(MaxListed, list.Count - MaxListed);
             int n = list.Count;
-            var msg = new RoomList { Codes = new string[n], MapIds = new string[n], HostNames = new string[n], States = new int[n], Members = new int[n], SeatsTaken = new int[n], SeatCounts = new int[n] };
+            var msg = new RoomList { Codes = new string[n], MapIds = new string[n], HostNames = new string[n], States = new int[n], Members = new int[n], SeatsTaken = new int[n], SeatCounts = new int[n], Domestic = new bool[n] };
             for (int i = 0; i < n; i++)
             {
                 var r = list[i];
@@ -199,6 +209,7 @@ namespace FamiconWars.Core
                 msg.Members[i] = r.Members.FindAll(m => m.Online).Count;
                 msg.SeatsTaken[i] = r.FilledSeats;
                 msg.SeatCounts[i] = r.SeatCount;
+                msg.Domestic[i] = r.Started && !r.GameOver ? r.MatchDomestic : r.Domestic;
             }
             send(conn, msg);
         }
@@ -333,6 +344,11 @@ namespace FamiconWars.Core
                     if (!host) err = "部屋主だけが公開範囲を変えられます";
                     else room.Public = arg != 0;
                     break;
+                case "domestic":
+                    if (!host) err = "部屋主だけが内政の有無を変えられます";
+                    else if (!room.Editable) err = "対戦中は変更できません";
+                    else room.Domestic = arg != 0;
+                    break;
                 case "start":
                     if (!host) err = "部屋主だけが開始できます";
                     else if (!room.Editable) err = "もう始まっています";
@@ -372,11 +388,13 @@ namespace FamiconWars.Core
 
         void StartMatch(OnlineRoom room)
         {
+            for (int k = 0; k < room.DomesticKey.Length; k++) room.DomesticKey[k] = -1;
             room.PlayedMapId = room.MapId;
             var seated = new bool[room.SeatCount];
             for (int s = 0; s < room.SeatCount; s++) seated[s] = room.Seats[s] != SeatKind.Empty;
             for (int s = 0; s < Armies.Max; s++) { room.MatchSeated[s] = s < room.SeatCount && seated[s]; room.Proxies[s] = null; }
-            room.State = GameState.Create(data, loadMap(room.MapId), nextSeed(), seated);
+            room.MatchDomestic = room.Domestic && data.Economy != null;
+            room.State = GameState.Create(room.MatchDomestic ? data : data.WithEconomy(null), loadMap(room.MapId), nextSeed(), seated);
             RulesEngine.StartGame(room.State);
             room.Cmds.Clear(); room.Seeds.Clear();
             for (int s = 0; s < Armies.Max; s++)
@@ -434,8 +452,9 @@ namespace FamiconWars.Core
             var me = room.ByConn(conn);
             if (me.Seat < 0) { send(conn, new Rejected { Error = "観戦中は操作できません" }); return; }
             var cmd = CommandCodec.Decode(text);
-            if (cmd == null || cmd is AbortCommand) { send(conn, new Rejected { Error = "不正なコマンドです" }); return; }
+            if (cmd == null || cmd is AbortCommand || cmd is EndInterludeCommand) { send(conn, new Rejected { Error = "不正なコマンドです" }); return; }
             if ((int)cmd.Army != me.Seat) { send(conn, new Rejected { Error = "手番ではありません" }); return; }
+            // 内政 commands (level up, convert, take back, 「内政終了」) come at any time; the rules decide if they are open now
             Apply(room, cmd, conn);
         }
 
@@ -482,6 +501,9 @@ namespace FamiconWars.Core
         {
             uint seed = nextSeed();
             room.State.Rng = new Rng(seed);
+            // a phase played by a BOT or a stand-in COM is followed by a 内政 time for the people (only the server decides)
+            if (cmd is EndPhaseCommand ep) ep.Interlude = WantsInterlude(room, cmd.Army);
+            bool wasInterlude = room.State.Interlude;
             var r = RulesEngine.Apply(room.State, cmd);
             if (!r.Ok)
             {
@@ -493,6 +515,7 @@ namespace FamiconWars.Core
             room.LastActivity = now;
             int key = PhaseKeyOf(room.State);
             if (key != room.PhaseKey) { room.PhaseKey = key; room.PhaseStart = now; }
+            if (!wasInterlude && room.State.Interlude) room.InterludeStart = now;
             var msg = new Applied { Index = room.Cmds.Count - 1, Cmd = text, Seed = seed, Hash = CommandCodec.Hash(room.State) };
             foreach (var m in room.Members) if (m.Online) send(m.Conn, msg);
             if (room.State.GameOver)
@@ -511,6 +534,9 @@ namespace FamiconWars.Core
             foreach (var room in rooms.Values)
             {
                 if (!room.Started || room.GameOver) continue;
+                BotDomestic(room);
+                if (room.GameOver) continue;
+                if (room.State.Interlude) { TickInterlude(room); continue; }   // nobody moves in the 内政 time
                 int seat = (int)room.State.Active;
                 if (room.MatchBotLevels[seat] == 0) { TickPerson(room, seat); continue; }
                 if (!room.BotsOnServer)
@@ -527,6 +553,57 @@ namespace FamiconWars.Core
                 if (cmd == null) continue;
                 if (!Apply(room, cmd, -1)) bot.Rejected(cmd);
             }
+        }
+
+        /// <summary>BOTs and stand-ins do their 内政 once per window it is open to them (rule based, DomesticAi).</summary>
+        void BotDomestic(OnlineRoom room)
+        {
+            var s = room.State;
+            if (!s.Domestic) return;
+            int key = PhaseKeyOf(s) * 2 + (s.Interlude ? 1 : 0);
+            for (int seat = 0; seat < s.Players && seat < room.DomesticKey.Length; seat++)
+            {
+                if (room.MatchBotLevels[seat] == 0 && room.Proxies[seat] == null) continue;
+                if (room.DomesticKey[seat] == key || !RulesEngine.DomesticOpen(s, (Army)seat)) continue;
+                room.DomesticKey[seat] = key;
+                foreach (var c in DomesticAi.Plan(s, (Army)seat))
+                    if (RulesEngine.Check(room.State, c) == null) Apply(room, c, -1);
+            }
+        }
+
+        /// <summary>Seats played by a person who is here (online) and still in the game.</summary>
+        IEnumerable<int> PeopleHere(OnlineRoom room)
+        {
+            for (int s = 0; s < room.SeatCount && s < room.State.Players; s++)
+            {
+                if (!room.MatchSeated[s] || room.MatchBotLevels[s] > 0 || room.State.IsOut((Army)s)) continue;
+                var m = room.InSeat(s);
+                if (m != null && m.Online) yield return s;
+            }
+        }
+
+        /// <summary>The phase that ends was played by a BOT or a stand-in, and a person is here to use a 内政 time.</summary>
+        bool WantsInterlude(OnlineRoom room, Army a)
+        {
+            if (!room.State.Domestic || a != room.State.Active || room.State.Interlude) return false;
+            int seat = (int)a;
+            if (room.MatchBotLevels[seat] == 0 && room.Proxies[seat] == null) return false;
+            foreach (var _ in PeopleHere(room)) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// The 内政 time ends when enough of the people here pressed 「内政終了」 (economy.csv interludeVote, 2/3),
+        /// when its time is up (the room's time per phase), or when nobody is here any more.
+        /// </summary>
+        void TickInterlude(OnlineRoom room)
+        {
+            int people = 0, ready = 0;
+            foreach (var s in PeopleHere(room)) { people++; if (room.State.InterludeReady[s]) ready++; }
+            int need = room.State.Data.Economy?.InterludeVotePermille ?? 666;
+            bool enough = people == 0 || ready * 1000 >= people * need;
+            bool timeUp = room.TurnSeconds > 0 && now - room.InterludeStart > room.TurnSeconds + TurnGrace;
+            if (enough || timeUp) Apply(room, new EndInterludeCommand { Army = Army.Red }, -1);
         }
 
         static int PhaseKeyOf(GameState s) => s.Day * s.Players + (int)s.Active;
@@ -624,6 +701,7 @@ namespace FamiconWars.Core
                 {
                     Code = room.Code, MapId = room.MapId, Started = room.Started, GameOver = room.GameOver, Public = room.Public,
                     Speed = room.Speed, BotsOnServer = room.BotsOnServer, SeatCount = room.SeatCount, TurnSeconds = room.TurnSeconds, SeatProxy = seatProxy,
+                    Domestic = room.Started && !room.GameOver ? room.MatchDomestic : room.Domestic,
                     MyId = m.Id, MySeat = m.Seat, HostId = room.HostId,
                     SeatKinds = (SeatKind[])room.Seats.Clone(), SeatNames = seatNames, SeatLevels = (int[])room.BotLevels.Clone(), SeatStyles = (int[])room.BotStyles.Clone(), SeatOnline = seatOnline,
                     MemberIds = ids, MemberNames = names, MemberSeats = seats, MemberOnline = online
@@ -636,7 +714,7 @@ namespace FamiconWars.Core
             {
                 MapId = room.PlayedMapId ?? room.MapId, MyArmy = seat < 0 ? -1 : seat, Cmds = room.Cmds.ToArray(), Seeds = room.Seeds.ToArray(),
                 BotSeeds = (uint[])room.BotSeeds.Clone(), BotLevels = (int[])room.MatchBotLevels.Clone(), BotStyles = (int[])room.MatchBotStyles.Clone(),
-                Seated = room.State == null ? "" : SeatedText(room), TurnSeconds = room.TurnSeconds, PhaseElapsed = room.State == null ? 0 : (float)Math.Max(0, now - room.PhaseStart)
+                Seated = room.State == null ? "" : SeatedText(room), TurnSeconds = room.TurnSeconds, Domestic = room.MatchDomestic, PhaseElapsed = room.State == null ? 0 : (float)Math.Max(0, now - room.PhaseStart)
             };
 
         static string SeatedText(OnlineRoom room)
@@ -657,8 +735,10 @@ namespace FamiconWars.Core
         public readonly List<uint> Seeds = new List<uint>();
 
         /// <summary>Starts from the map and replays the log.</summary>
-        public void Rebuild(GameData data, MapDef map, string[] cmds, uint[] seeds, string seated = null)
+        /// <param name="domestic">The match is played with 内政 (data must carry the economy for it).</param>
+        public void Rebuild(GameData data, MapDef map, string[] cmds, uint[] seeds, string seated = null, bool domestic = true)
         {
+            if (!domestic && data.Economy != null) data = data.WithEconomy(null);
             bool[] seatedArmies = null;
             if (!string.IsNullOrEmpty(seated)) { seatedArmies = new bool[seated.Length]; for (int i = 0; i < seated.Length; i++) seatedArmies[i] = seated[i] == '1'; }
             State = GameState.Create(data, map, 1, seatedArmies);

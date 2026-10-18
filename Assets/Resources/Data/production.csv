@@ -1,0 +1,17 @@
+unit,HQ,CITY,FACTORY,AIRPORT,PORT
+INF,1,1,1,,
+MECH,1,,2,,
+TANK_A,1,,4,,
+TANK_B,1,,2,,
+APC,1,,2,,
+ART_A,1,,4,,
+ART_B,1,,2,,
+AAM,1,,3,,
+AAG,1,,3,,
+SUP,1,,2,,
+FTR_A,,,,4,
+FTR_B,,,,2,
+BMB,,,,3,
+HELI,,,,1,
+BSHIP,,,,,3
+LANDER,,,,,1

@@ -84,6 +84,10 @@ namespace FamiconWars.Game
         readonly List<RaycastResult> pointerHits = new List<RaycastResult>();
         public bool BannerShowing => bannerT >= 0;
 
+        /// <summary>A window that is not part of the board is open (rules, chart, settings, result, records, menus).</summary>
+        public bool ModalOpen => (overPanel != null && overPanel.gameObject.activeSelf) || HowToVisible || MatchupVisible || SoundPanelVisible
+            || RecordsVisible || TitleVisible || OnlineLobbyVisible || RoomVisible;
+
         public void Build()
         {
             font = Resources.Load<TMP_FontAsset>("Fonts/NotoSansJP SDF");
@@ -104,6 +108,7 @@ namespace FamiconWars.Game
             BuildHintAndToast();
             BuildActionMenu();
             BuildProduce();
+            BuildDomestic();
             BuildBanner();
             BuildGameOver();
             BuildBattle();
@@ -296,7 +301,7 @@ namespace FamiconWars.Game
 
             var t = s.TerrainAt(x, y);
             terrainName.text = Labels.Get(t.NameKey);
-            terrainOwner.text = t.IsProperty ? Labels.Army(s.Owner[s.Index(x, y)]) : "";
+            terrainOwner.text = t.IsProperty ? Labels.Army(s.Owner[s.Index(x, y)]) + (s.Domestic ? " Lv" + s.LevelAt(x, y) + (s.Reserve[s.Index(x, y)] != 0 ? " ▲" : "") : "") : "";
             terrainOwner.color = t.IsProperty ? ArmyTextColor(s.Owner[s.Index(x, y)]) : Muted;
             terrainDef.text = t.Cost[(int)MoveClass.Ship] > 0 && t.DefShip > 0 && t.Id != "PORT" ? "防御 艦" + t.DefShip
                 : "防御 歩" + t.DefFoot + " 車" + t.DefVehicle + (t.DefShip > 1 ? " 艦" + t.DefShip : "");
@@ -307,7 +312,7 @@ namespace FamiconWars.Game
             if (u != null)
             {
                 var d = s.Def(u);
-                var icon = UnitIcons.Get(d.Id, u.Army);
+                var icon = UnitIcons.Get(d.Icon, u.Army);
                 unitSwatch.sprite = icon;
                 unitSwatch.color = icon != null ? Color.white : ArmyColor(u.Army);
                 unitSwatch.rectTransform.localScale = new Vector3(ArmyStyle.FacesLeft(u.Army) ? -1 : 1, 1, 1);
@@ -334,7 +339,7 @@ namespace FamiconWars.Game
             topBar.gameObject.SetActive(on);
             if (actionPanel != null) actionPanel.gameObject.SetActive(on);
             ShowZoomWidget(on);
-            if (!on) infoCard.gameObject.SetActive(false);
+            if (!on) { infoCard.gameObject.SetActive(false); HideDomestic(); ShowInterlude(false); }
             if (!on && playersRoot != null) playersRoot.gameObject.SetActive(false);
         }
 
@@ -438,7 +443,8 @@ namespace FamiconWars.Game
             producePanel.gameObject.SetActive(false);
         }
 
-        public void ShowProduce(string facilityName, int funds, List<UnitDef> units, Action<UnitDef> pick, Army army = Army.Red)
+        /// <param name="locked">Units this facility makes at a higher level (内政): shown greyed with the level they need.</param>
+        public void ShowProduce(string facilityName, int funds, List<UnitDef> units, Action<UnitDef> pick, Army army = Army.Red, List<(UnitDef def, int need)> locked = null)
         {
             ClearChildren(produceList);
             produceTitle.text = "生産 <size=60%><color=#A3AC92>" + facilityName + "   資金 " + funds.ToString("N0") + "</color></size>";
@@ -456,7 +462,7 @@ namespace FamiconWars.Game
                 Fill(txt.rectTransform, 70, 0, 250, 0);
                 var pic = Panel("Icon", b.transform, Color.white).GetComponent<Image>();
                 pic.raycastTarget = false; pic.preserveAspect = true;
-                pic.sprite = UnitIcons.Get(d.Id, army);
+                pic.sprite = UnitIcons.Get(d.Icon, army);
                 if (pic.sprite == null) pic.color = Color.clear;
                 else if (!afford) pic.color = new Color(1, 1, 1, 0.4f);
                 Pin(pic.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(14, 0), new Vector2(46, 46), pivot: new Vector2(0, 0.5f));
@@ -469,7 +475,29 @@ namespace FamiconWars.Game
                 Fill(price.rectTransform, 500, 0, 18, 0);
                 if (first == null && afford) first = b;
             }
-            producePanel.sizeDelta = new Vector2(680, 110 + units.Count * 56);
+            int rows = units.Count;
+            if (locked != null)
+                foreach (var (d, need) in locked)
+                {
+                    var b = MakeButton(d.Id, produceList, "", false, () => { });
+                    b.interactable = false;
+                    b.gameObject.AddComponent<LayoutElement>().preferredHeight = 50;
+                    var txt = b.GetComponentInChildren<TextMeshProUGUI>();
+                    txt.alignment = TextAlignmentOptions.MidlineLeft; txt.color = Muted;
+                    txt.text = Labels.Get(d.NameKey);
+                    Fill(txt.rectTransform, 70, 0, 250, 0);
+                    var pic = Panel("Icon", b.transform, new Color(1, 1, 1, 0.3f)).GetComponent<Image>();
+                    pic.raycastTarget = false; pic.preserveAspect = true;
+                    pic.sprite = UnitIcons.Get(d.Icon, army);
+                    if (pic.sprite == null) pic.color = Color.clear;
+                    Pin(pic.rectTransform, new Vector2(0, 0.5f), new Vector2(0, 0.5f), new Vector2(14, 0), new Vector2(46, 46), pivot: new Vector2(0, 0.5f));
+                    pic.rectTransform.localScale = new Vector3(ArmyStyle.FacesLeft(army) ? -1 : 1, 1, 1);
+                    var why = Label("Need", b.transform, SizeSmall, Brass, TextAlignmentOptions.MidlineRight, true);
+                    why.text = "施設レベル" + need + "で生産可";
+                    Fill(why.rectTransform, 220, 0, 18, 0);
+                    rows++;
+                }
+            producePanel.sizeDelta = new Vector2(680, 110 + rows * 56);
             dim.gameObject.SetActive(true);
             dim.SetAsLastSibling();
             producePanel.SetAsLastSibling();
@@ -530,13 +558,17 @@ namespace FamiconWars.Game
         }
 
         /// <param name="ranking">Three or more armies: one line per army, winner first (null: none).</param>
+        float overBaseHeight = -1;
+
         public void ShowGameOver(Army winner, string reason, string ranking = null)
         {
             bool ranked = !string.IsNullOrEmpty(ranking);
             overRanking.gameObject.SetActive(ranked);
             if (ranked) overRanking.text = ranking;
             int rows = ranked ? ranking.Split('\n').Length : 0;
-            ((RectTransform)overPanel).sizeDelta = new Vector2(620, 300 + (ranked ? rows * 46 + 24 : 0));
+            if (overBaseHeight < 0) overBaseHeight = overPanel.sizeDelta.y;
+            // keep the width the buttons were laid out for (three buttons need 800); only the height grows with the ranking
+            overPanel.sizeDelta = new Vector2(overPanel.sizeDelta.x, overBaseHeight + (ranked ? rows * 46 + 24 : 0));
             dim.gameObject.SetActive(true);
             dim.SetAsLastSibling();
             overPanel.SetAsLastSibling();
@@ -550,7 +582,7 @@ namespace FamiconWars.Game
         public void ResetScreens()
         {
             overPanel.gameObject.SetActive(false);
-            HideMenus(); HideProduce(); HideActionMenu(); Hint(null);
+            HideMenus(); HideProduce(); HideActionMenu(); Hint(null); HideDomestic(); ShowInterlude(false);
             toastPlate.gameObject.SetActive(false);
         }
 
@@ -558,6 +590,7 @@ namespace FamiconWars.Game
         {
             UpdateBattle();
             UpdatePlayersFade();
+            DisarmOnClickElsewhere();
             if (toastPlate != null && toastPlate.gameObject.activeSelf && Time.unscaledTime > toastUntil) toastPlate.gameObject.SetActive(false);
             if (bannerT >= 0)
             {
@@ -570,6 +603,33 @@ namespace FamiconWars.Game
                 if (bannerT > inT + hold + outT) { bannerT = -1; bannerRt.gameObject.SetActive(false); }
             }
         }
+
+        /// <summary>A press anywhere but on an armed button (「本当に?」「もう一度で終了」) takes the question back.</summary>
+        bool pointerWasDown;
+
+        void DisarmOnClickElsewhere()
+        {
+            var ptr = UnityEngine.InputSystem.Pointer.current;
+            var mouse = UnityEngine.InputSystem.Mouse.current;
+            bool down = (ptr != null && ptr.press.isPressed) || (mouse != null && mouse.rightButton.isPressed);
+            bool pressed = down && !pointerWasDown;     // the frame a button went down
+            pointerWasDown = down;
+            if (!pressed || (ptr == null && mouse == null)) return;
+            Vector2 at = ptr != null ? ptr.position.ReadValue() : mouse.position.ReadValue();
+            if (surrenderArmedUntil >= 0 && !Under(surrenderBtn, at))
+            {
+                surrenderArmedUntil = -1;
+                SetText(surrenderBtn.GetComponentInChildren<TextMeshProUGUI>(), "降伏");
+            }
+            if (abortArmedUntil >= 0 && abortBtn != null && !Under(abortBtn, at))
+            {
+                abortArmedUntil = -1;
+                SetText(abortBtn.GetComponentInChildren<TextMeshProUGUI>(), "対局を終了");
+            }
+        }
+
+        static bool Under(Button b, Vector2 screen) =>
+            b != null && b.gameObject.activeInHierarchy && RectTransformUtility.RectangleContainsScreenPoint((RectTransform)b.transform, screen, null);
 
         // ================= helpers =================
 

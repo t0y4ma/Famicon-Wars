@@ -10,7 +10,7 @@ namespace FamiconWars.Game
     /// </summary>
     public static class UnitIcons
     {
-        static readonly string[] Order = { "INF", "MECH", "TANK_A", "TANK_B", "APC", "ART_A", "ART_B", "AAM", "AAG", "SUP", "FTR_A", "FTR_B", "BMB", "HELI", "BSHIP", "LANDER" };
+        public static readonly string[] Order = { "INF", "MECH", "TANK_A", "TANK_B", "APC", "ART_A", "ART_B", "AAM", "AAG", "SUP", "FTR_A", "FTR_B", "BMB", "HELI", "BSHIP", "LANDER" };
         const int Cell = 32;
         static Texture2D atlas;
         static readonly Dictionary<string, Sprite> cache = new Dictionary<string, Sprite>();

@@ -35,6 +35,10 @@ namespace FamiconWars.Core
     {
         public int Index;
         public string Id, NameKey, ShortName;
+        /// <summary>Display name from units.csv (empty: the built-in label for NameKey).</summary>
+        public string Name;
+        /// <summary>Picture to draw (an id of the built-in unit pictures); the unit's own id when not set.</summary>
+        public string Icon;
         public int Price, Move, Fuel, FuelPerPhase, Ammo, AmmoPrice, RangeMin, RangeMax;
         public MoveClass MoveClass;
         /// <summary>0 = cannot capture, 1 = all but HQ, 2 = everything.</summary>
@@ -95,6 +99,8 @@ namespace FamiconWars.Core
         public readonly List<TerrainDef> Terrains = new List<TerrainDef>();
         public int[,] Damage; // [attacker, defender], -1 = cannot attack
         public Rules Rules = new Rules();
+        /// <summary>内政 (facility levels, reservations, conversion): null = the original rules without it.</summary>
+        public Economy Economy;
         readonly Dictionary<string, UnitDef> unitById = new Dictionary<string, UnitDef>();
         readonly Dictionary<string, TerrainDef> terrainById = new Dictionary<string, TerrainDef>();
         readonly Dictionary<char, TerrainDef> terrainByChar = new Dictionary<char, TerrainDef>();
@@ -112,7 +118,16 @@ namespace FamiconWars.Core
             return g;
         }
 
-        public static GameData Load(string unitsCsv, string terrainsCsv, string damageCsv, string rulesCsv)
+        /// <param name="economyCsv">Data/economy (内政 settings); with productionCsv (Data/production). Leave out for the original rules.</param>
+        /// <summary>Same definitions with or without 内政 (records made before it replay without it).</summary>
+        public GameData WithEconomy(Economy e)
+        {
+            var g = (GameData)MemberwiseClone();
+            g.Economy = e;
+            return g;
+        }
+
+        public static GameData Load(string unitsCsv, string terrainsCsv, string damageCsv, string rulesCsv, string economyCsv = null, string productionCsv = null)
         {
             var g = new GameData();
             foreach (var r in Csv.Read(unitsCsv))
@@ -123,7 +138,8 @@ namespace FamiconWars.Core
                     Price = r.Int("price"), Move = r.Int("move"), MoveClass = (MoveClass)Enum.Parse(typeof(MoveClass), r["moveClass"]),
                     Fuel = r.Int("fuel"), FuelPerPhase = r.Int("fuelPerPhase"), Ammo = r.Int("ammo"), AmmoPrice = r.Int("ammoPrice"),
                     RangeMin = r.Int("rangeMin"), RangeMax = r.Int("rangeMax"), Capture = r.Int("capture"),
-                    CargoCapacity = r.Int("cargoCapacity"), CargoClass = r["cargoClass"], CanSupply = r.Int("canSupply") == 1
+                    CargoCapacity = r.Int("cargoCapacity"), CargoClass = r["cargoClass"], CanSupply = r.Int("canSupply") == 1,
+                    Name = r["name"], Icon = string.IsNullOrEmpty(r["icon"]) ? r["id"] : r["icon"]
                 };
                 g.Units.Add(u); g.unitById[u.Id] = u;
             }
@@ -175,6 +191,7 @@ namespace FamiconWars.Core
                     }
                 }
             }
+            if (!string.IsNullOrEmpty(economyCsv)) g.Economy = Economy.Load(g, economyCsv, productionCsv);
             return g;
         }
 

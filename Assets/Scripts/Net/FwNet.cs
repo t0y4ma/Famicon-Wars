@@ -16,7 +16,7 @@ namespace FamiconWars.Net
     public struct RoomListMsg : NetworkMessage
     {
         public string[] codes, mapIds, hostNames;
-        public int[] states, members, seatsTaken, seatCounts;     // state: 0 waiting, 1 playing, 2 match over
+        public int[] states, members, seatsTaken, seatCounts; public bool[] domestic;     // state: 0 waiting, 1 playing, 2 match over
     }
     public struct JoinRoomMsg : NetworkMessage { public int version; public string code; public string token; public string name; }
     public struct LeaveRoomMsg : NetworkMessage { }
@@ -34,11 +34,11 @@ namespace FamiconWars.Net
         public string code; public string mapId; public bool started, gameOver, isPublic;
         public int myId, mySeat, hostId;
         public int speed; public bool botsOnServer;
-        public int seatCount, turnSeconds; public bool[] seatProxy;
+        public int seatCount, turnSeconds; public bool[] seatProxy; public bool domestic;
         public int[] seatKinds; public string[] seatNames; public int[] seatLevels; public int[] seatStyles; public bool[] seatOnline;
         public int[] memberIds; public string[] memberNames; public int[] memberSeats; public bool[] memberOnline;
     }
-    public struct GameLogMsg : NetworkMessage { public string mapId; public int myArmy; public string[] cmds; public uint[] seeds; public uint[] botSeeds; public int[] botLevels; public int[] botStyles; public string seated; public int turnSeconds; public float phaseElapsed; }
+    public struct GameLogMsg : NetworkMessage { public string mapId; public int myArmy; public string[] cmds; public uint[] seeds; public uint[] botSeeds; public int[] botLevels; public int[] botStyles; public string seated; public int turnSeconds; public float phaseElapsed; public bool domestic; }
     public struct AppliedMsg : NetworkMessage { public int index; public string cmd; public uint seed; public int hash; }
     public struct RejectedMsg : NetworkMessage { public string error; }
     public struct LobbyErrorMsg : NetworkMessage { public string error; }
@@ -51,7 +51,7 @@ namespace FamiconWars.Net
     public static class NetConfig
     {
         /// <summary>Bump whenever messages or rules change: client and server must match.</summary>
-        public const int ProtocolVersion = 8;
+        public const int ProtocolVersion = 9;
         public static ushort ServerPort = 7782;
         public const string PublicUrl = "wss://nine.freeddns.org/fw";
         public const string TokenKey = "fw.clientToken";
@@ -241,17 +241,17 @@ namespace FamiconWars.Net
                     {
                         code = s.Code, mapId = s.MapId, started = s.Started, gameOver = s.GameOver, isPublic = s.Public,
                         myId = s.MyId, mySeat = s.MySeat, hostId = s.HostId, speed = s.Speed, botsOnServer = s.BotsOnServer,
-                        seatCount = s.SeatCount, turnSeconds = s.TurnSeconds, seatProxy = s.SeatProxy,
+                        seatCount = s.SeatCount, turnSeconds = s.TurnSeconds, seatProxy = s.SeatProxy, domestic = s.Domestic,
                         seatKinds = Array.ConvertAll(s.SeatKinds, k => (int)k), seatNames = s.SeatNames, seatLevels = s.SeatLevels, seatStyles = s.SeatStyles, seatOnline = s.SeatOnline,
                         memberIds = s.MemberIds, memberNames = s.MemberNames, memberSeats = s.MemberSeats, memberOnline = s.MemberOnline
                     });
                     break;
-                case GameLog l: c.Send(new GameLogMsg { mapId = l.MapId, myArmy = l.MyArmy, cmds = l.Cmds, seeds = l.Seeds, botSeeds = l.BotSeeds, botLevels = l.BotLevels, botStyles = l.BotStyles, seated = l.Seated, turnSeconds = l.TurnSeconds, phaseElapsed = l.PhaseElapsed }); break;
+                case GameLog l: c.Send(new GameLogMsg { mapId = l.MapId, myArmy = l.MyArmy, cmds = l.Cmds, seeds = l.Seeds, botSeeds = l.BotSeeds, botLevels = l.BotLevels, botStyles = l.BotStyles, seated = l.Seated, turnSeconds = l.TurnSeconds, phaseElapsed = l.PhaseElapsed, domestic = l.Domestic }); break;
                 case Applied a: c.Send(new AppliedMsg { index = a.Index, cmd = a.Cmd, seed = a.Seed, hash = a.Hash }); break;
                 case Rejected r: c.Send(new RejectedMsg { error = r.Error }); break;
                 case LobbyError e: c.Send(new LobbyErrorMsg { error = e.Error }); break;
                 case LeftRoom _: c.Send(new LeftRoomMsg()); break;
-                case RoomList l: c.Send(new RoomListMsg { codes = l.Codes, mapIds = l.MapIds, hostNames = l.HostNames, states = l.States, members = l.Members, seatsTaken = l.SeatsTaken, seatCounts = l.SeatCounts }); break;
+                case RoomList l: c.Send(new RoomListMsg { codes = l.Codes, mapIds = l.MapIds, hostNames = l.HostNames, states = l.States, members = l.Members, seatsTaken = l.SeatsTaken, seatCounts = l.SeatCounts, domestic = l.Domestic }); break;
             }
         }
 

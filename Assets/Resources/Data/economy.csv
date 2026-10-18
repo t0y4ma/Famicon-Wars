@@ -1,0 +1,20 @@
+key,value,note
+maxLevel,4,施設レベルの上限(全施設がレベル1から始まる)
+incomeFactor,0.5,収入 = 基礎収入 × (1 + (レベル-1) × この値)
+cost.HQ,8000|12000|16000,基地をレベル2・3・4にする費用
+cost.CITY,4000|6000|8000,都市をレベル2・3・4にする費用
+cost.FACTORY,5000|8000|12000,工場をレベル2・3・4にする費用
+cost.AIRPORT,6000|9000|12000,空港をレベル2・3・4にする費用
+cost.PORT,6000|9000|12000,港をレベル2・3・4にする費用
+hqRadius,2|3|4|-1,基地のレベルごとの生産可能距離(-1 = どこでも)
+convertFrom,CITY,転向できる施設
+convertMinLevel,2,転向に必要なレベル
+convertLevelDrop,1,転向後のレベル = max(レベル - この値、1)
+convert.FACTORY,5000,都市から工場への転向費用
+convert.AIRPORT,8000,都市から空港への転向費用
+convert.PORT,8000,都市から港への転向費用(海に面した都市のみ)
+captureLevelDrop,1,占領された施設のレベル = max(レベル - この値、1)
+freeActLevel,4,このレベル以上の施設では手番で最初に作った部隊がすぐ動ける(0 = なし)
+freeActTerrains,FACTORY|AIRPORT|PORT,上の特典がある施設
+timing,offturn,内政できる時(offturn = 自分以外の手番中と内政の時間 / interlude = 内政の時間だけ)
+interludeVote,0.666,内政の時間を終えるのに「内政終了」を押す必要がある人間の割合

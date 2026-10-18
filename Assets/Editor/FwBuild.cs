@@ -11,6 +11,8 @@ namespace FamiconWars.EditorTools
     /// Release builds, same layout as the other games on the VM (see Deploy/README.md).
     ///  - server: Linux dedicated server (.x86_64, Server subtarget, IL2CPP) -> Builds/Server + Builds/FieldCommandServer.zip
     ///  - client: WebGL -> Builds/WebGL (tracked in git; Cloudflare Pages publishes it on every push)
+    ///  - push (optional): after a successful build, git add / commit / push in the background (FwGit),
+    ///    once the editor has switched back and settled. Progress: Library/FwBuild/last-git.txt
     /// Deploy the server and the web client together whenever the protocol changes.
     /// </summary>
     public static class FwBuild
@@ -31,14 +33,26 @@ namespace FamiconWars.EditorTools
         [MenuItem("フィールド・コマンド/ビルド/両方(サーバー+WebGL)")]
         public static void BuildBothMenu() => Request(server: true, web: true);
 
+        [MenuItem("フィールド・コマンド/ビルド/両方(サーバー+WebGL)してプッシュ")]
+        public static void BuildBothPushMenu() => Request(server: true, web: true, pushMessage: "ビルド " + DateTime.Now.ToString("yyyy-MM-dd HH:mm"));
+
+        [MenuItem("フィールド・コマンド/ビルド/クライアント(WebGL)してプッシュ")]
+        public static void BuildWebGLPushMenu() => Request(server: false, web: true, pushMessage: "WebGLビルド " + DateTime.Now.ToString("yyyy-MM-dd HH:mm"));
+
         // IL2CPP Linux builds fail with "No Linux sysroot found" unless the editor is switched to Linux
         // first, so switch, wait for the recompile, then continue (survives the domain reload).
         const string PendingKey = "FwBuild.Pending";
         const string ResumeAtKey = "FwBuild.ResumeAt";
+        const string PushKey = "FwBuild.PushMessage";        // commit message for the push after the build
+        const string PushAtKey = "FwBuild.PushAt";
+        const double PushSettleSeconds = 10;
         const double SettleSeconds = 20;
 
-        public static void Request(bool server, bool web)
+        /// <param name="pushMessage">Not null: commit everything with this message and push after a successful build (in the background).</param>
+        public static void Request(bool server, bool web, string pushMessage = null)
         {
+            if (pushMessage != null) SessionState.SetString(PushKey + ".Requested", pushMessage);
+            else SessionState.EraseString(PushKey + ".Requested");
             if (!server || EditorUserBuildSettings.activeBuildTarget == BuildTarget.StandaloneLinux64) { Run(server, web); return; }
             SessionState.SetString(PendingKey, (server ? "1" : "0") + "," + (web ? "1" : "0"));
             Debug.Log("[FwBuild] switching to Linux before building (takes a moment)");
@@ -87,11 +101,41 @@ namespace FamiconWars.EditorTools
                 if (EditorUserBuildSettings.activeBuildTarget != restoreTarget)
                     EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Standalone, restoreTarget);
             }
+            var push = SessionState.GetString(PushKey + ".Requested", "");
+            SessionState.EraseString(PushKey + ".Requested");
+            if (ok && push.Length > 0)
+            {
+                // wait for the switch back to Windows (a script reload) before git starts
+                SessionState.SetString(PushKey, push);
+                log.AppendLine("push: ビルド後にバックグラウンドで実行します(" + FwGit.ResultFile + ")");
+                WatchPush();
+            }
+            else if (push.Length > 0) log.AppendLine("push: ビルドが失敗したのでプッシュしません");
             log.Insert(0, (ok ? "OK" : "FAILED") + $"  {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n");
             Directory.CreateDirectory(Path.GetDirectoryName(ResultFile));
             File.WriteAllText(ResultFile, log.ToString());
             Debug.Log("[FwBuild] " + log);
             return ok;
+        }
+
+        [InitializeOnLoadMethod]
+        static void WatchPush()
+        {
+            EditorApplication.update -= PushWhenReady;
+            if (string.IsNullOrEmpty(SessionState.GetString(PushKey, ""))) return;
+            SessionState.SetFloat(PushAtKey, (float)(EditorApplication.timeSinceStartup + PushSettleSeconds));
+            EditorApplication.update += PushWhenReady;
+        }
+
+        static void PushWhenReady()
+        {
+            var msg = SessionState.GetString(PushKey, "");
+            if (string.IsNullOrEmpty(msg)) { EditorApplication.update -= PushWhenReady; return; }
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating || EditorApplication.isPlayingOrWillChangePlaymode || FwGit.Running) return;
+            if (EditorApplication.timeSinceStartup < SessionState.GetFloat(PushAtKey, 0)) return;
+            EditorApplication.update -= PushWhenReady;
+            SessionState.EraseString(PushKey);
+            FwGit.CommitAndPushAsync(msg);
         }
 
         static bool BuildServer(System.Text.StringBuilder log)

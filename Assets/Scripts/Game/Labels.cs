@@ -17,6 +17,13 @@ namespace FamiconWars.Game
             { "terrain.beach", "砂浜" }, { "terrain.sea", "海" },
         };
 
+        /// <summary>Unit names written in units.csv (the 「部隊の能力・相性」 window) take the place of the built-in ones.</summary>
+        public static void Register(FamiconWars.Core.GameData data)
+        {
+            foreach (var u in data.Units)
+                if (!string.IsNullOrEmpty(u.Name) && !string.IsNullOrEmpty(u.NameKey)) ja[u.NameKey] = u.Name;
+        }
+
         public static string Get(string key) => ja.TryGetValue(key, out var v) ? v : key;
         public static string Army(FamiconWars.Core.Army a) => FamiconWars.Core.Armies.Name(a);
     }
